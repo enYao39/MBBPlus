@@ -1,10 +1,10 @@
 plugins {
-    alias(libs.plugins.agp.app)
+    alias(libs.plugins.android.application)
 }
 
 android {
     namespace = "com.floatwindow.morebubblebutton"
-    compileSdk = 36
+    compileSdk = 37
     buildToolsVersion = "36.0.0"
 
     defaultConfig {
@@ -22,16 +22,21 @@ android {
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+        create("release") {
+            storeFile = file("[LOCAL_PATH_REDACTED]")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("debug")
         }
         release {
             isMinifyEnabled = false
             proguardFiles("proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
