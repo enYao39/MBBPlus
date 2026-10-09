@@ -114,6 +114,33 @@ public class MoreBubbleHookModule extends XposedModule {
             });
             Log.i(TAG, "Hooked shouldShowBubbleButton OK");
 
+            // applyBubbleAction() is the common SystemUI path that paints the
+            // native Bubble icon in both the shade row and the Heads-up card.
+            // Keep the original listener (NotificationEntryAdapter) intact and
+            // only replace the visual affordance when Freeform is selected.
+            try {
+                Method applyBubbleAction = clazz.getMethod("applyBubbleAction", View.class);
+                hook(applyBubbleAction).intercept(chain -> {
+                    Object result = chain.proceed();
+                    try {
+                        Context ctx = ((View) chain.getThisObject()).getContext();
+                        if (ctx != null && ModuleSettings.getOpenMode(ctx)
+                                == ModuleSettings.OPEN_MODE_FREEFORM) {
+                            Object root = chain.getArg(0);
+                            if (root instanceof View) {
+                                replaceFreeformPopupIcon((View) root, ctx);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "Freeform popup icon update: " + t.getMessage());
+                    }
+                    return result;
+                });
+                Log.i(TAG, "Hooked NotificationContentView.applyBubbleAction OK");
+            } catch (Throwable t) {
+                Log.w(TAG, "Hook applyBubbleAction: " + t.getMessage());
+            }
+
             // Evolution17 仍使用 legacy NotificationContentView 作为 Heads-up 卡片容器。
             // setHeadsUpChild() 负责替换 Heads-up 内容，selectLayout() 负责切换显示状态；
             // 两处都刷新横条，避免内容重绑或 Heads-up 收起后残留。
@@ -242,6 +269,39 @@ public class MoreBubbleHookModule extends XposedModule {
             }
         } catch (Throwable t) { Log.w(TAG, "Hook onUserChangedBubble: " + t.getMessage()); }
 
+        // Evolution17's native popup/shade Bubble button enters through the
+        // NotificationEntryAdapter. Its Entry is a field, not a method argument.
+        // Intercept only in Freeform mode; on every failure the original method
+        // continues, which preserves the native Bubble fallback.
+        try {
+            Class<?> adapterClass = cl.loadClass(
+                    "com.android.systemui.statusbar.notification.collection.NotificationEntryAdapter");
+            Method bubbleClick = adapterClass.getMethod("onNotificationBubbleIconClicked");
+            hook(bubbleClick).intercept(chain -> {
+                Object adapter = chain.getThisObject();
+                Context context = getNotificationAdapterContext(adapter);
+                if (context == null || ModuleSettings.getOpenMode(context)
+                        != ModuleSettings.OPEN_MODE_FREEFORM) {
+                    return chain.proceed();
+                }
+                Object entry = getFieldSystemUi(adapter, "entry");
+                if (entry != null && launchNotificationInFreeform(context, entry,
+                        "Bubble button")) {
+                    if (sBubblesManager != null) {
+                        dismissClickedNotificationIfAutoCancel(sBubblesManager, entry);
+                        collapseShadeFromManager(sBubblesManager);
+                    }
+                    Log.i(TAG, "Bubble button handled by Freeform");
+                    return null;
+                }
+                Log.i(TAG, "Bubble button: Freeform unavailable, using Bubble");
+                return chain.proceed();
+            });
+            Log.i(TAG, "Hooked NotificationEntryAdapter.onNotificationBubbleIconClicked OK");
+        } catch (Throwable t) {
+            Log.w(TAG, "Hook Bubble button: " + t.getMessage());
+        }
+
         // 5. dismissBubbleWithKey guard - 防止刚强制创建的气泡被 Ranking/Channel 立刻移除。
         try {
             Class<?> dataCls = cl.loadClass("com.android.wm.shell.bubbles.BubbleData");
@@ -310,6 +370,32 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) {
             Log.w(TAG, "Hook BubblesManager constructors: " + t.getMessage());
         }
+    }
+
+    private static Context getNotificationAdapterContext(Object adapter) {
+        try {
+            Object starter = getFieldSystemUi(adapter, "notificationActivityStarter");
+            Object context = getFieldSystemUi(starter, "mContext");
+            if (context instanceof Context) return (Context) context;
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    /**
+     * NotificationContentView uses the framework id 0x01020281 for the
+     * ImageView it passes to applyBubbleAction(). Using that stable id avoids
+     * replacing unrelated app notification ImageViews.
+     */
+    private static void replaceFreeformPopupIcon(View root, Context ctx) {
+        if (root == null || ctx == null) return;
+        View iconView = root.findViewById(0x01020281);
+        if (!(iconView instanceof android.widget.ImageView)) return;
+        android.graphics.drawable.Drawable icon = getFreeformActionIcon(
+                ctx, ctx.getResources(), ctx.getPackageName());
+        if (icon == null) return;
+        android.widget.ImageView imageView = (android.widget.ImageView) iconView;
+        imageView.setImageDrawable(icon);
+        imageView.setContentDescription(getFreeformLabel(ctx));
     }
 
     /**
@@ -1529,7 +1615,7 @@ public class MoreBubbleHookModule extends XposedModule {
         int styleId = res.getIdentifier("OverviewActionButton.Blur", "style", pkg);
         if (styleId == 0) styleId = res.getIdentifier("OverviewActionButton", "style", pkg);
         Button btn = (styleId != 0) ? new Button(ctx, null, 0, styleId) : new Button(ctx);
-        String label = getBubbleButtonLabel(ctx);
+        String label = getConfiguredOpenLabel(ctx);
         btn.setText(label);
         btn.setContentDescription(label);
         btn.setTooltipText(label);
@@ -1537,15 +1623,45 @@ public class MoreBubbleHookModule extends XposedModule {
         btn.setTag("bubble_button");
 
         // 图标
-        int iconId = res.getIdentifier("ic_bubble_button", "drawable", pkg);
-        if (iconId == 0) iconId = res.getIdentifier("ic_bubble_bar", "drawable", pkg);
-        if (iconId != 0) {
-            android.graphics.drawable.Drawable icon = res.getDrawable(iconId, null);
-            if (icon != null) btn.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
-        }
+        android.graphics.drawable.Drawable icon = getConfiguredActionIcon(ctx, res, pkg);
+        if (icon != null) btn.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
 
         btn.setOnClickListener(v -> onBubbleButtonClick((View) btn.getParent().getParent()));
         return btn;
+    }
+
+    private android.graphics.drawable.Drawable getConfiguredActionIcon(
+            Context ctx, android.content.res.Resources hostResources, String hostPackage) {
+        if (ModuleSettings.getOpenMode(ctx) == ModuleSettings.OPEN_MODE_FREEFORM) {
+            android.graphics.drawable.Drawable icon = getFreeformActionIcon(
+                    ctx, hostResources, hostPackage);
+            if (icon != null) return icon;
+        }
+        int iconId = hostResources.getIdentifier("ic_bubble_button", "drawable", hostPackage);
+        if (iconId == 0) iconId = hostResources.getIdentifier("ic_bubble_bar", "drawable", hostPackage);
+        if (iconId != 0) return hostResources.getDrawable(iconId, ctx.getTheme());
+        return null;
+    }
+
+    private static android.graphics.drawable.Drawable getFreeformActionIcon(
+            Context ctx, android.content.res.Resources hostResources, String hostPackage) {
+        try {
+            Context moduleContext = ctx.createPackageContext(
+                    "com.floatwindow.morebubblebutton", Context.CONTEXT_IGNORE_SECURITY);
+            android.graphics.drawable.Drawable icon = moduleContext.getResources().getDrawable(
+                    R.drawable.ic_freeform_button, moduleContext.getTheme()).mutate();
+            try {
+                int tintId = hostResources.getIdentifier(
+                        "materialColorOnSurface", "color", hostPackage);
+                if (tintId != 0) icon.setTint(hostResources.getColor(tintId, ctx.getTheme()));
+            } catch (Throwable tintError) {
+                Log.w(TAG, "Freeform icon tint failed: " + tintError.getMessage());
+            }
+            return icon;
+        } catch (Throwable t) {
+            Log.w(TAG, "Freeform icon load failed: " + t.getMessage());
+            return null;
+        }
     }
 
     @SuppressLint("DiscouragedApi")
@@ -1673,19 +1789,19 @@ public class MoreBubbleHookModule extends XposedModule {
             int bgId = res.getIdentifier("app_chip_menu_item_bg", "drawable", pkg);
             if (bgId != 0) menuItem.setBackground(res.getDrawable(bgId, ctx.getTheme()));
 
-            int iconId = res.getIdentifier("ic_bubble_button", "drawable", pkg);
-            if (iconId == 0) iconId = res.getIdentifier("ic_bubble_bar", "drawable", pkg);
             View iconView = menuItem.findViewById(res.getIdentifier("icon", "id", pkg));
-            if (iconView != null && iconId != 0) {
-                android.graphics.drawable.Drawable icon = res.getDrawable(iconId, ctx.getTheme());
+            if (iconView != null) {
+                android.graphics.drawable.Drawable icon = getConfiguredActionIcon(ctx, res, pkg);
                 int tintId = res.getIdentifier("materialColorOnSurface", "color", pkg);
-                if (tintId != 0) icon.setTint(res.getColor(tintId, ctx.getTheme()));
-                iconView.setBackground(icon);
+                if (icon != null) {
+                    if (tintId != 0) icon.setTint(res.getColor(tintId, ctx.getTheme()));
+                    iconView.setBackground(icon);
+                }
             }
 
             View tv = menuItem.findViewById(res.getIdentifier("text", "id", pkg));
             if (tv instanceof android.widget.TextView)
-                ((android.widget.TextView) tv).setText(getBubbleButtonLabel(ctx));
+                ((android.widget.TextView) tv).setText(getConfiguredOpenLabel(ctx));
 
             LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) menuItem.getLayoutParams();
             lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
