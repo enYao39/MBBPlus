@@ -182,19 +182,39 @@ public class MoreBubbleHookModule extends XposedModule {
         // the row enters Heads-up mode.
         hookHeadsUpRowLifecycle(cl);
 
-        // 2. injectBubbleMetadata at construction time
+        // 2. Make system think it can bubble by hooking NotificationEntry.canBubble
         try {
             Class<?> entryClass = cl.loadClass("com.android.systemui.statusbar.notification.collection.NotificationEntry");
-            for (java.lang.reflect.Constructor<?> c : entryClass.getDeclaredConstructors()) {
-                hook(c).intercept(chain -> {
-                    Object result = chain.proceed();
-                    prepareBubbleMetadata(chain.getThisObject());
+            java.lang.reflect.Method canBubbleMethod = null;
+            try {
+                canBubbleMethod = entryClass.getDeclaredMethod("canBubble");
+            } catch (NoSuchMethodException e) {
+                // It might not exist in all versions, ignore if not found
+            }
+            if (canBubbleMethod != null) {
+                hook(canBubbleMethod).intercept(chain -> {
+                    boolean result = (boolean) chain.proceed();
+                    if (result) return true;
+                    try {
+                        Object entry = chain.getThisObject();
+                        Object sbn = getFieldSystemUi(entry, "mSbn");
+                        Notification notif = sbn != null ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
+                        if (notif != null 
+                                && (notif.flags & Notification.FLAG_ONGOING_EVENT) == 0 
+                                && notif.contentIntent != null) {
+                            return true;
+                        }
+                    } catch (Throwable t) {
+                        // ignore
+                    }
                     return result;
                 });
+                Log.i(TAG, "Hooked NotificationEntry.canBubble OK");
+            } else {
+                Log.w(TAG, "NotificationEntry.canBubble method not found");
             }
-            Log.i(TAG, "Hooked NotificationEntry constructors OK");
         } catch (Throwable t) {
-            Log.w(TAG, "Hook NotificationEntry: " + t.getMessage());
+            Log.w(TAG, "Hook NotificationEntry canBubble: " + t.getMessage());
         }
 
         // 3. BubblesManager.expandStackAndSelectBubble - 拦截系统点击调用
@@ -425,8 +445,9 @@ public class MoreBubbleHookModule extends XposedModule {
                         updateHeadsUpSwipeHandle(contentView);
                         if ("onNotificationUpdated".equals(name)
                                 || "setBubbleClickListener".equals(name)) {
-                            refreshBubbleButton(getFieldSystemUi(
-                                    contentView, "mContainingNotification"));
+                            Object row = getFieldSystemUi(contentView, "mContainingNotification");
+                            prepareBubbleMetadata(getNotificationEntryFromRow(row));
+                            refreshBubbleButton(row);
                         }
                         return result;
                     });
