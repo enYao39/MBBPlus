@@ -684,12 +684,16 @@ public class MoreBubbleHookModule extends XposedModule {
                 return;
             }
 
-            View handle = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
-            if (handle != null && handle.getParent() != host) {
-                if (handle.getParent() instanceof ViewGroup) {
-                    ((ViewGroup) handle.getParent()).removeView(handle);
+            java.util.List<View> handles = new java.util.ArrayList<>();
+            findHandlesInTree(rowView, handles);
+            
+            View handle = null;
+            for (View h : handles) {
+                if (handle == null && h.getParent() == host) {
+                    handle = h;
+                } else if (h.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) h.getParent()).removeView(h);
                 }
-                handle = null;
             }
             if (handle == null) {
                 SwipeHandleView newHandle = new SwipeHandleView(ctx);
@@ -933,11 +937,27 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
+    private static void findHandlesInTree(View root, java.util.List<View> result) {
+        if (root == null) return;
+        if (HEADS_UP_HANDLE_TAG.equals(root.getTag())) {
+            result.add(root);
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) root;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                findHandlesInTree(vg.getChildAt(i), result);
+            }
+        }
+    }
+
     private static void removeSwipeHandle(Object row) {
-        if (!(row instanceof ViewGroup)) return;
-        View handle = ((ViewGroup) row).findViewWithTag(HEADS_UP_HANDLE_TAG);
-        if (handle != null && handle.getParent() instanceof ViewGroup) {
-            ((ViewGroup) handle.getParent()).removeView(handle);
+        if (!(row instanceof View)) return;
+        java.util.List<View> handles = new java.util.ArrayList<>();
+        findHandlesInTree((View) row, handles);
+        for (View handle : handles) {
+            if (handle.getParent() instanceof ViewGroup) {
+                ((ViewGroup) handle.getParent()).removeView(handle);
+            }
         }
     }
 
