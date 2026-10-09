@@ -182,59 +182,20 @@ public class MoreBubbleHookModule extends XposedModule {
         // the row enters Heads-up mode.
         hookHeadsUpRowLifecycle(cl);
 
-        // 2. injectBubbleMetadata at bind time
+        // 2. injectBubbleMetadata at construction time
         try {
-            Class<?> binderClass = cl.loadClass(
-                    "com.android.systemui.statusbar.notification.collection.inflation.NotificationRowBinderImpl");
-            java.lang.reflect.Method target = null;
-            java.lang.reflect.Method fallback = null;
-            for (java.lang.reflect.Method m : binderClass.getDeclaredMethods()) {
-                boolean hasRow = false;
-                boolean hasEntry = false;
-                for (Class<?> parameterType : m.getParameterTypes()) {
-                    if (parameterType.getName().contains("ExpandableNotificationRow")) {
-                        hasRow = true;
-                    }
-                    if (parameterType.getName().contains("NotificationEntry")) {
-                        hasEntry = true;
-                    }
-                }
-                if (hasRow && hasEntry && m.getName().toLowerCase(Locale.ROOT).contains("inflate")) {
-                    target = m;
-                    break;
-                }
-                if (hasRow && hasEntry && fallback == null) fallback = m;
-            }
-            if (target == null) target = fallback;
-            if (target != null) {
-                final int parameterCount = target.getParameterCount();
-                hook(target).intercept(chain -> {
-                    Object row = null;
-                    Object entry = null;
-                    for (int i = 0; i < parameterCount; i++) {
-                        Object argument = chain.getArg(i);
-                        if (argument == null) continue;
-                        String name = argument.getClass().getName();
-                        if (name.contains("ExpandableNotificationRow")) row = argument;
-                        if (name.contains("NotificationEntry")) entry = argument;
-                    }
-                    if (entry == null) entry = getNotificationEntryFromRow(row);
-                    // Metadata must exist before inflation/rebind starts. Otherwise the
-                    // first Heads-up row can bind without a Bubble action and only a later
-                    // notification update will refresh it.
-                    prepareBubbleMetadata(entry);
+            Class<?> entryClass = cl.loadClass("com.android.systemui.statusbar.notification.collection.NotificationEntry");
+            for (java.lang.reflect.Constructor<?> c : entryClass.getDeclaredConstructors()) {
+                hook(c).intercept(chain -> {
                     Object result = chain.proceed();
-                    if (row != null) {
-                        refreshBubbleButton(row);
-                        postHeadsUpRowSync(row);
-                    }
+                    prepareBubbleMetadata(chain.getThisObject());
                     return result;
                 });
-                Log.i(TAG, "Hooked NotificationRowBinderImpl OK");
-            } else {
-                Log.w(TAG, "NotificationRowBinderImpl row bind method not found");
             }
-        } catch (Throwable t) { Log.e(TAG, "Hook RowBinder: " + t.getMessage()); }
+            Log.i(TAG, "Hooked NotificationEntry constructors OK");
+        } catch (Throwable t) {
+            Log.w(TAG, "Hook NotificationEntry: " + t.getMessage());
+        }
 
         // 3. BubblesManager.expandStackAndSelectBubble - 拦截系统点击调用
         try {
