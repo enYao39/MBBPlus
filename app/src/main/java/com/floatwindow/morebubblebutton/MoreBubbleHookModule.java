@@ -87,6 +87,7 @@ public class MoreBubbleHookModule extends XposedModule {
     // for every callback in the same frame.
     private static final Map<View, Runnable> sPendingHeadsUpSyncs = new WeakHashMap<>();
     private static final Map<View, Boolean> sTrackedHeadsUpRows = new WeakHashMap<>();
+    private static final Map<View, Object> sSwipeHandleRows = new WeakHashMap<>();
     private static volatile boolean sShadeOrQsExpanded;
     private static volatile boolean sQsFullscreen;
     // Tracks whether any row has reported being on the keyguard. This is a
@@ -662,21 +663,16 @@ public class MoreBubbleHookModule extends XposedModule {
                 return;
             }
 
-            View handle = null;
-            View found = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
-            while (found != null) {
-                if (handle == null && found.getParent() == host) {
-                    handle = found; // keep the first valid one
-                } else {
-                    if (found.getParent() instanceof ViewGroup) {
-                        ((ViewGroup) found.getParent()).removeView(found);
-                    } else {
-                        break; // prevent infinite loop if orphaned
-                    }
+            // Keep one stable interactive view. Removing and re-adding it on every lifecycle
+            // callback cancels an in-progress touch sequence and breaks swipe-down launching.
+            View handle = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
+            if (handle != null && handle.getParent() != host) {
+                if (handle.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) handle.getParent()).removeView(handle);
                 }
-                found = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
+                sSwipeHandleRows.remove(handle);
+                handle = null;
             }
-
             if (handle == null) {
                 SwipeHandleView newHandle = new SwipeHandleView(ctx);
                 newHandle.setTag(HEADS_UP_HANDLE_TAG);
@@ -733,6 +729,7 @@ public class MoreBubbleHookModule extends XposedModule {
                         + host.getClass().getSimpleName() + " inside "
                         + rowView.getClass().getSimpleName());
             }
+            sSwipeHandleRows.put(handle, row);
             if (handle.getParent() != host) {
                 if (handle.getParent() instanceof ViewGroup) {
                     ((ViewGroup) handle.getParent()).removeView(handle);
@@ -827,7 +824,7 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static void positionSwipeHandle(ViewGroup host, View handle, Context ctx) {
         int handleHeight = dp(ctx, 30);
-        int bottomMargin = dp(ctx, 3);
+        int bottomMargin = dp(ctx, ModuleSettings.getSwipeHandleBottomMargin(ctx));
         int actualHeight = 0;
         Object value = invokeSystemUi(host, "getActualHeight");
         if (value instanceof Number) actualHeight = ((Number) value).intValue();
@@ -916,6 +913,7 @@ public class MoreBubbleHookModule extends XposedModule {
         ViewGroup rowView = (ViewGroup) row;
         View handle = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
         while (handle != null) {
+            sSwipeHandleRows.remove(handle);
             if (handle.getParent() instanceof ViewGroup) {
                 ((ViewGroup) handle.getParent()).removeView(handle);
             } else {
@@ -982,6 +980,8 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static Object getHeadsUpRowFromHandle(View handle) {
         if (handle == null) return null;
+        Object mappedRow = sSwipeHandleRows.get(handle);
+        if (mappedRow != null) return mappedRow;
         android.view.ViewParent parent = handle.getParent();
         while (parent != null) {
             Object row = getFieldSystemUi(parent, "mContainingNotification");
