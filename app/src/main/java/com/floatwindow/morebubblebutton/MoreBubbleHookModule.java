@@ -93,7 +93,8 @@ public class MoreBubbleHookModule extends XposedModule {
                     try { ctx = ((View) chain.getThisObject()).getContext(); } catch (Throwable ignored) {}
                     if (ctx != null && !ModuleSettings.isSystemUiBubbleEnabled(ctx)) return chain.proceed();
                     if (ctx != null && ModuleSettings.getPopupPresentation(ctx)
-                            == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE) return false;
+                            == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE
+                            && isHeadsUpContentView(chain.getThisObject())) return false;
                 } catch (Throwable ignored) {}
                 boolean original = (boolean) chain.proceed();
                 if (original) return true;
@@ -160,6 +161,13 @@ public class MoreBubbleHookModule extends XposedModule {
             });
             Method attached = clazz.getMethod("onAttachedToWindow");
             hook(attached).intercept(chain -> {
+                Object result = chain.proceed();
+                updateHeadsUpSwipeHandle(chain.getThisObject());
+                return result;
+            });
+            Method onLayout = clazz.getMethod("onLayout", boolean.class,
+                    int.class, int.class, int.class, int.class);
+            hook(onLayout).intercept(chain -> {
                 Object result = chain.proceed();
                 updateHeadsUpSwipeHandle(chain.getThisObject());
                 return result;
@@ -419,16 +427,9 @@ public class MoreBubbleHookModule extends XposedModule {
                     && ModuleSettings.getPopupPresentation(ctx)
                     == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE;
             Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
-            Object entry = row != null ? getFieldSystemUi(row, "mEntry") : null;
-            Object sbn = entry != null ? getFieldSystemUi(entry, "mSbn") : null;
-            Notification notification = sbn != null
-                    ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
+            Notification notification = getNotificationFromContentView(row);
             Object headsUpChild = getFieldSystemUi(contentViewObject, "mHeadsUpChild");
-            Object isHeadsUpValue = getFieldSystemUi(contentViewObject, "mIsHeadsUp");
-            Object visibleTypeValue = getFieldSystemUi(contentViewObject, "mVisibleType");
-            boolean isHeadsUp = Boolean.TRUE.equals(isHeadsUpValue)
-                    || (visibleTypeValue instanceof Integer
-                    && ((Integer) visibleTypeValue) == VISIBLE_TYPE_HEADS_UP);
+            boolean isHeadsUp = isHeadsUpContentView(contentViewObject);
             boolean validNotification = notification != null
                     && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
                     && notification.contentIntent != null;
@@ -480,10 +481,42 @@ public class MoreBubbleHookModule extends XposedModule {
                 contentView.addView(newHandle, lp);
                 handle = newHandle;
             }
+            contentView.setClipChildren(false);
+            handle.bringToFront();
+            handle.setAlpha(1f);
             handle.setContentDescription(getConfiguredOpenLabel(ctx));
             handle.setVisibility(View.VISIBLE);
         } catch (Throwable t) {
             Log.w(TAG, "update Heads-up handle: " + t.getMessage());
+        }
+    }
+
+    private static boolean isHeadsUpContentView(Object contentViewObject) {
+        Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
+        if (row != null) {
+            Object headsUpState = invokeSystemUi(row, "isHeadsUpState");
+            if (Boolean.TRUE.equals(headsUpState)) return true;
+        }
+        Object isHeadsUpValue = getFieldSystemUi(contentViewObject, "mIsHeadsUp");
+        if (Boolean.TRUE.equals(isHeadsUpValue)) return true;
+        Object visibleTypeValue = getFieldSystemUi(contentViewObject, "mVisibleType");
+        return visibleTypeValue instanceof Integer
+                && ((Integer) visibleTypeValue) == VISIBLE_TYPE_HEADS_UP;
+    }
+
+    private static Notification getNotificationFromContentView(Object row) {
+        if (row == null) return null;
+        try {
+            Object adapter = getFieldSystemUi(row, "mEntryAdapter");
+            Object sbn = adapter != null ? invokeSystemUi(adapter, "getSbn") : null;
+            if (sbn != null) return (Notification) invokeSystemUi(sbn, "getNotification");
+        } catch (Throwable ignored) {}
+        try {
+            Object entry = getFieldSystemUi(row, "mEntry");
+            Object sbn = entry != null ? getFieldSystemUi(entry, "mSbn") : null;
+            return sbn != null ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
@@ -2190,9 +2223,13 @@ public class MoreBubbleHookModule extends XposedModule {
     // ==================== 工具方法 ====================
 
     private static Object getFieldSystemUi(Object obj, String name) {
-        try { java.lang.reflect.Field f = obj.getClass().getDeclaredField(name);
-            f.setAccessible(true); return f.get(obj); }
-        catch (Throwable t) { return null; }
+        if (obj == null) return null;
+        try {
+            java.lang.reflect.Field f = findFieldSystemUi(obj.getClass(), name);
+            if (f == null) return null;
+            f.setAccessible(true);
+            return f.get(obj);
+        } catch (Throwable t) { return null; }
     }
 
     private static Object invokeSystemUi(Object obj, String method) {
