@@ -127,8 +127,7 @@ public class MoreBubbleHookModule extends XposedModule {
                     Object result = chain.proceed();
                     try {
                         Context ctx = ((View) chain.getThisObject()).getContext();
-                        if (ctx != null && ModuleSettings.getOpenMode(ctx)
-                                == ModuleSettings.OPEN_MODE_FREEFORM) {
+                        if (isFreeformOpenMode(ctx)) {
                             Object root = chain.getArg(0);
                             if (root instanceof View) {
                                 replaceFreeformPopupIcon((View) root, ctx);
@@ -290,8 +289,7 @@ public class MoreBubbleHookModule extends XposedModule {
             hook(bubbleClick).intercept(chain -> {
                 Object adapter = chain.getThisObject();
                 Context context = getNotificationAdapterContext(adapter);
-                if (context == null || ModuleSettings.getOpenMode(context)
-                        != ModuleSettings.OPEN_MODE_FREEFORM) {
+                if (!isFreeformOpenMode(context)) {
                     return chain.proceed();
                 }
                 Object entry = getFieldSystemUi(adapter, "entry");
@@ -549,7 +547,7 @@ public class MoreBubbleHookModule extends XposedModule {
             Object row = getFieldSystemUi(contentView, "mContainingNotification");
             Object entry = row != null ? getFieldSystemUi(row, "mEntry") : null;
             if (entry == null) return;
-            if (ModuleSettings.getOpenMode(handle.getContext()) == ModuleSettings.OPEN_MODE_FREEFORM) {
+            if (isFreeformOpenMode(handle.getContext())) {
                 if (launchNotificationInFreeform(handle.getContext(), entry, "Heads-up swipe")) return;
                 Log.i(TAG, "Heads-up swipe: freeform unavailable, falling back to Bubble");
             }
@@ -972,7 +970,7 @@ public class MoreBubbleHookModule extends XposedModule {
         return fallbackTaskId;
     }
 
-    private static void requestLmoFreeformForTask(Context ctx, String packageName,
+    private static boolean requestLmoFreeformForTask(Context ctx, String packageName,
             String activityName, int userId, int taskId, String reason) {
         try {
             Intent startFreeform = new Intent("com.libremobileos.freeform.START_FREEFORM")
@@ -984,12 +982,14 @@ public class MoreBubbleHookModule extends XposedModule {
                     .putExtra("userId", userId)
                     .putExtra("taskId", taskId);
             UserHandle user = getUserHandle(userId);
-            if (user == null) return;
+            if (user == null) return false;
             ctx.sendBroadcastAsUser(startFreeform, user);
             Log.i(TAG, reason + ": requested LMO Freeform task move for "
                     + packageName + " taskId=" + taskId);
+            return true;
         } catch (Throwable t) {
             Log.w(TAG, reason + ": LMO Freeform task move failed: " + t.getMessage());
+            return false;
         }
     }
 
@@ -1204,7 +1204,7 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static String getConfiguredOpenLabel(Context ctx) {
-        return ModuleSettings.getOpenMode(ctx) == ModuleSettings.OPEN_MODE_FREEFORM
+        return isFreeformOpenMode(ctx)
                 ? getFreeformLabel(ctx) : getBubbleButtonLabel(ctx);
     }
 
@@ -1278,7 +1278,7 @@ public class MoreBubbleHookModule extends XposedModule {
             if (controller == null || pkg == null) return false;
             Notification notif = (Notification) invokeSystemUi(sbn, "getNotification");
             Context ctx = (Context) getFieldSystemUi(controller, "mContext");
-            if (ctx != null && ModuleSettings.getOpenMode(ctx) == ModuleSettings.OPEN_MODE_FREEFORM) {
+            if (isFreeformOpenMode(ctx)) {
                 boolean launched = launchNotificationInFreeform(ctx, entry, reason);
                 if (launched) {
                     runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
@@ -1653,8 +1653,13 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static Object getField(Object obj, String name) {
-        try { java.lang.reflect.Field f = obj.getClass().getDeclaredField(name); f.setAccessible(true); return f.get(obj); }
-        catch (Throwable t) { return null; }
+        if (obj == null) return null;
+        try {
+            java.lang.reflect.Field f = findField(obj.getClass(), name);
+            if (f == null) return null;
+            f.setAccessible(true);
+            return f.get(obj);
+        } catch (Throwable t) { return null; }
     }
     private static Object invoke(Object obj, String method) {
         try { java.lang.reflect.Method m = findMethodSystemUi(obj.getClass(), method); return m != null ? m.invoke(obj) : null; }
@@ -1864,7 +1869,7 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private android.graphics.drawable.Drawable getConfiguredActionIcon(
             Context ctx, android.content.res.Resources hostResources, String hostPackage) {
-        if (ModuleSettings.getOpenMode(ctx) == ModuleSettings.OPEN_MODE_FREEFORM) {
+        if (isFreeformOpenMode(ctx)) {
             android.graphics.drawable.Drawable icon = getFreeformActionIcon(
                     ctx, hostResources, hostPackage);
             if (icon != null) return icon;
@@ -2085,7 +2090,7 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private boolean openTaskFromRecents(Context ctx, Intent intent, Object task, int userId) {
-        if (ModuleSettings.getOpenMode(ctx) == ModuleSettings.OPEN_MODE_FREEFORM) {
+        if (isFreeformOpenMode(ctx)) {
             if (isFreeformSupported(ctx) && startTaskInFreeform(task, ctx)) {
                 Log.i(TAG, "Opened recents task in freeform");
                 return true;
@@ -2097,8 +2102,82 @@ public class MoreBubbleHookModule extends XposedModule {
         return startTaskFullscreen(ctx, intent, userId);
     }
 
-    /** Evolution/AOSP's native path: ActivityManagerWrapper.startActivityFromRecents(TaskKey, options). */
+    private static boolean isFreeformOpenMode(Context ctx) {
+        return ctx != null && ModuleSettings.getOpenMode(ctx)
+                == ModuleSettings.OPEN_MODE_FREEFORM;
+    }
+
+    private static final class RecentsFreeformTarget {
+        final String packageName;
+        final String activityName;
+        final int userId;
+        final int taskId;
+
+        RecentsFreeformTarget(String packageName, String activityName, int userId, int taskId) {
+            this.packageName = packageName;
+            this.activityName = activityName;
+            this.userId = userId;
+            this.taskId = taskId;
+        }
+    }
+
+    /**
+     * Evolution 17 owns the Freeform display through LMOFreeform. Recents already has
+     * a real task, so move that task directly instead of starting its base Intent in a
+     * normal task and trying to change its windowing mode afterward.
+     */
     private boolean startTaskInFreeform(Object task, Context ctx) {
+        RecentsFreeformTarget target = getRecentsFreeformTarget(task);
+        if (isLmoFreeformServiceAvailable()) {
+            if (target != null && requestLmoFreeformForTask(ctx, target.packageName,
+                    target.activityName, target.userId, target.taskId, "Recents")) {
+                return true;
+            }
+            // Do not claim success with the native ActivityOptions path on an LMO device:
+            // Evolution's task-area modifier may silently keep the task fullscreen.
+            Log.w(TAG, "Recents LMO Freeform request could not be prepared");
+            return false;
+        }
+
+        // Keep the AOSP/Evolution DesktopMode route for devices that do not expose LMO.
+        return startTaskInNativeFreeform(task, ctx);
+    }
+
+    private static RecentsFreeformTarget getRecentsFreeformTarget(Object task) {
+        try {
+            Object key = getField(task, "key");
+            if (key == null) key = invoke(task, "getKey");
+            if (key == null) return null;
+
+            Intent baseIntent = (Intent) getField(key, "baseIntent");
+            ComponentName component = (ComponentName) getField(task, "topActivity");
+            if (component == null) component = (ComponentName) invoke(task, "getTopComponent");
+            if (component == null && baseIntent != null) component = baseIntent.getComponent();
+
+            String packageName = component != null ? component.getPackageName() : null;
+            if (packageName == null && baseIntent != null) packageName = baseIntent.getPackage();
+            int userId = getIntField(key, "userId", 0);
+            int taskId = getIntField(key, "id", -1);
+            if (packageName == null || component == null || taskId < 0) {
+                Log.w(TAG, "Recents Freeform target incomplete: package=" + packageName
+                        + " component=" + component + " taskId=" + taskId);
+                return null;
+            }
+            return new RecentsFreeformTarget(packageName, component.getClassName(),
+                    userId >= 0 ? userId : 0, taskId);
+        } catch (Throwable t) {
+            Log.w(TAG, "Resolve Recents Freeform target failed: " + t.getMessage());
+            return null;
+        }
+    }
+
+    private static int getIntField(Object object, String name, int defaultValue) {
+        Object value = getField(object, name);
+        return value instanceof Number ? ((Number) value).intValue() : defaultValue;
+    }
+
+    /** AOSP/Evolution DesktopMode fallback for devices without LMO Freeform. */
+    private boolean startTaskInNativeFreeform(Object task, Context ctx) {
         try {
             Object key = getField(task, "key");
             if (key == null) key = invoke(task, "getKey");
@@ -2125,7 +2204,7 @@ public class MoreBubbleHookModule extends XposedModule {
                 return success;
             }
         } catch (Throwable t) {
-            Log.w(TAG, "startTaskInFreeform: " + t.getMessage());
+            Log.w(TAG, "startTaskInNativeFreeform: " + t.getMessage());
         }
         return false;
     }
