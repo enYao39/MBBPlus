@@ -24,6 +24,11 @@
     <string name="popup_presentation_button">Bubble button</string>
     <string name="popup_presentation_handle">Swipe handle</string>
     <string name="popup_presentation_summary">Show one affordance in Heads-up only. Swipe the handle downward to open.</string>
+    <string name="swipe_handle_length">Handle length</string>
+    <string name="swipe_handle_thickness">Handle thickness</string>
+    <string name="swipe_handle_length_hint">32dp short · 96dp long</string>
+    <string name="swipe_handle_thickness_hint">3dp thin · 14dp thick</string>
+    <string name="swipe_handle_value">%1$s · %2$ddp</string>
     <string name="position_mode_title">Display row</string>
     <string name="position_mode_follow">Follow original</string>
     <string name="position_mode_second">Second row</string>

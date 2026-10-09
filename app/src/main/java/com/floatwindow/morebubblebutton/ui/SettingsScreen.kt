@@ -82,6 +82,12 @@ fun SettingsScreen() {
     var systemUiBubbleEnabled by remember { mutableStateOf(ModuleSettings.isSystemUiBubbleEnabled(ctx)) }
     var openMode by remember { mutableIntStateOf(ModuleSettings.getOpenMode(ctx)) }
     var popupPresentation by remember { mutableIntStateOf(ModuleSettings.getPopupPresentation(ctx)) }
+    var swipeHandleLength by remember {
+        mutableFloatStateOf(ModuleSettings.getSwipeHandleLength(ctx).toFloat())
+    }
+    var swipeHandleThickness by remember {
+        mutableFloatStateOf(ModuleSettings.getSwipeHandleThickness(ctx).toFloat())
+    }
     var positionMode by remember { mutableIntStateOf(ModuleSettings.getPositionMode(ctx)) }
     var sliderX by remember { mutableFloatStateOf(ModuleSettings.getPosX(ctx).toFloat()) }
     var sliderY by remember { mutableFloatStateOf(ModuleSettings.getPosY(ctx).toFloat()) }
@@ -168,6 +174,52 @@ fun SettingsScreen() {
                         ModuleSettings.setPopupPresentation(ctx, it)
                     }
                 )
+                if (popupPresentation == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE) {
+                    PreferenceDivider()
+                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
+                        FineTuneSlider(
+                            label = stringResource(R.string.swipe_handle_length),
+                            hint = stringResource(R.string.swipe_handle_length_hint),
+                            value = swipeHandleLength,
+                            valueText = stringResource(
+                                R.string.swipe_handle_value,
+                                stringResource(R.string.swipe_handle_length),
+                                swipeHandleLength.toInt()
+                            ),
+                            valueRange = 32f..96f,
+                            steps = 63,
+                            onValueChange = { swipeHandleLength = it },
+                            onCommit = {
+                                ModuleSettings.setSwipeHandleLength(ctx, swipeHandleLength.toInt())
+                            },
+                            onStep = { delta ->
+                                swipeHandleLength = (swipeHandleLength + delta).coerceIn(32f, 96f)
+                                ModuleSettings.setSwipeHandleLength(ctx, swipeHandleLength.toInt())
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        FineTuneSlider(
+                            label = stringResource(R.string.swipe_handle_thickness),
+                            hint = stringResource(R.string.swipe_handle_thickness_hint),
+                            value = swipeHandleThickness,
+                            valueText = stringResource(
+                                R.string.swipe_handle_value,
+                                stringResource(R.string.swipe_handle_thickness),
+                                swipeHandleThickness.toInt()
+                            ),
+                            valueRange = 3f..14f,
+                            steps = 10,
+                            onValueChange = { swipeHandleThickness = it },
+                            onCommit = {
+                                ModuleSettings.setSwipeHandleThickness(ctx, swipeHandleThickness.toInt())
+                            },
+                            onStep = { delta ->
+                                swipeHandleThickness = (swipeHandleThickness + delta).coerceIn(3f, 14f)
+                                ModuleSettings.setSwipeHandleThickness(ctx, swipeHandleThickness.toInt())
+                            }
+                        )
+                    }
+                }
             }
         }
 
@@ -224,6 +276,12 @@ fun SettingsScreen() {
                             label = stringResource(R.string.position_x),
                             hint = stringResource(R.string.position_x_hint),
                             value = sliderX,
+                            valueText = stringResource(
+                                R.string.position_value,
+                                stringResource(R.string.position_x), sliderX.toInt()
+                            ),
+                            valueRange = 0f..100f,
+                            steps = 99,
                             onValueChange = { sliderX = it },
                             onCommit = {
                                 ModuleSettings.setPosX(ctx, sliderX.toInt())
@@ -240,6 +298,12 @@ fun SettingsScreen() {
                             label = stringResource(R.string.position_y),
                             hint = stringResource(R.string.position_y_hint),
                             value = sliderY,
+                            valueText = stringResource(
+                                R.string.position_value,
+                                stringResource(R.string.position_y), sliderY.toInt()
+                            ),
+                            valueRange = 0f..100f,
+                            steps = 99,
                             onValueChange = { sliderY = it },
                             onCommit = {
                                 ModuleSettings.setPosY(ctx, sliderY.toInt())
@@ -570,6 +634,9 @@ private fun FineTuneSlider(
     label: String,
     hint: String,
     value: Float,
+    valueText: String,
+    valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int,
     onValueChange: (Float) -> Unit,
     onCommit: () -> Unit,
     onStep: (Float) -> Unit
@@ -580,7 +647,7 @@ private fun FineTuneSlider(
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(
-            text = stringResource(R.string.position_value, label, value.toInt()),
+            text = valueText,
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.SemiBold
         )
@@ -604,8 +671,8 @@ private fun FineTuneSlider(
             value = value,
             onValueChange = onValueChange,
             onValueChangeFinished = onCommit,
-            valueRange = 0f..100f,
-            steps = 99,
+            valueRange = valueRange,
+            steps = steps,
             modifier = Modifier
                 .weight(1f)
                 .padding(horizontal = 8.dp)

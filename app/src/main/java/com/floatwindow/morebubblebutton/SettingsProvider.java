@@ -32,6 +32,12 @@ public class SettingsProvider extends ContentProvider {
         add(cursor, ModuleSettings.KEY_POPUP_PRESENTATION,
                 prefs.getInt(ModuleSettings.KEY_POPUP_PRESENTATION,
                         ModuleSettings.POPUP_PRESENTATION_BUBBLE_BUTTON));
+        add(cursor, ModuleSettings.KEY_SWIPE_HANDLE_LENGTH,
+                prefs.getInt(ModuleSettings.KEY_SWIPE_HANDLE_LENGTH,
+                        ModuleSettings.DEFAULT_SWIPE_HANDLE_LENGTH_DP));
+        add(cursor, ModuleSettings.KEY_SWIPE_HANDLE_THICKNESS,
+                prefs.getInt(ModuleSettings.KEY_SWIPE_HANDLE_THICKNESS,
+                        ModuleSettings.DEFAULT_SWIPE_HANDLE_THICKNESS_DP));
         return cursor;
     }
 

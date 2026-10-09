@@ -18,11 +18,15 @@ public class ModuleSettings {
     public static final String KEY_SYSTEMUI_BUBBLE_ENABLED = "systemui_bubble_enabled";
     public static final String KEY_OPEN_MODE = "open_mode"; // 0=Bubble 1=Freeform
     public static final String KEY_POPUP_PRESENTATION = "popup_presentation"; // 0=按钮 1=下滑横条
+    public static final String KEY_SWIPE_HANDLE_LENGTH = "swipe_handle_length_dp";
+    public static final String KEY_SWIPE_HANDLE_THICKNESS = "swipe_handle_thickness_dp";
 
     public static final int OPEN_MODE_BUBBLE = 0;
     public static final int OPEN_MODE_FREEFORM = 1;
     public static final int POPUP_PRESENTATION_BUBBLE_BUTTON = 0;
     public static final int POPUP_PRESENTATION_SWIPE_HANDLE = 1;
+    public static final int DEFAULT_SWIPE_HANDLE_LENGTH_DP = 56;
+    public static final int DEFAULT_SWIPE_HANDLE_THICKNESS_DP = 7;
     private static final Uri SETTINGS_URI = SettingsProvider.CONTENT_URI;
     private static final long REMOTE_CACHE_MS = 250L;
     private static volatile long sRemoteCacheAt;
@@ -148,8 +152,32 @@ public class ModuleSettings {
                         ? POPUP_PRESENTATION_SWIPE_HANDLE : POPUP_PRESENTATION_BUBBLE_BUTTON).apply();
     }
 
+    public static int getSwipeHandleLength(Context ctx) {
+        return clamp(getInt(ctx, KEY_SWIPE_HANDLE_LENGTH,
+                DEFAULT_SWIPE_HANDLE_LENGTH_DP), 32, 96);
+    }
+
+    public static void setSwipeHandleLength(Context ctx, int value) {
+        getPrefs(ctx).edit().putInt(KEY_SWIPE_HANDLE_LENGTH,
+                clamp(value, 32, 96)).apply();
+    }
+
+    public static int getSwipeHandleThickness(Context ctx) {
+        return clamp(getInt(ctx, KEY_SWIPE_HANDLE_THICKNESS,
+                DEFAULT_SWIPE_HANDLE_THICKNESS_DP), 3, 14);
+    }
+
+    public static void setSwipeHandleThickness(Context ctx, int value) {
+        getPrefs(ctx).edit().putInt(KEY_SWIPE_HANDLE_THICKNESS,
+                clamp(value, 3, 14)).apply();
+    }
+
     private static int clampPercent(int v) {
         return Math.max(0, Math.min(100, v));
+    }
+
+    private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     // 兼容旧接口
