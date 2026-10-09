@@ -79,6 +79,8 @@ public class MoreBubbleHookModule extends XposedModule {
     private ClassLoader mSystemUiClassLoader;
     private static final Map<String, Long> sForcedBubbleKeys = new ConcurrentHashMap<>();
     private static final long FORCED_BUBBLE_GRACE_MS = 8000L;
+    private static final Map<String, PendingHeadsUpLaunch> sPendingHeadsUpLaunches =
+            new ConcurrentHashMap<>();
 
     private void hookSystemUi(ClassLoader cl) {
         Log.i(TAG, "Hooking SystemUI...");
@@ -423,6 +425,7 @@ public class MoreBubbleHookModule extends XposedModule {
     private void hookNotificationContentLifecycle(Class<?> contentViewClass) {
         hookContentMethod(contentViewClass, "setHeadsUpChild");
         hookContentMethod(contentViewClass, "setContractedChild");
+        hookContentMethod(contentViewClass, "setHeadsUp");
         hookContentMethod(contentViewClass, "selectLayout");
         hookContentMethod(contentViewClass, "onAttachedToWindow");
         hookContentMethod(contentViewClass, "onLayout");
@@ -472,11 +475,37 @@ public class MoreBubbleHookModule extends XposedModule {
             hookRowMethods(rowClass, "onLayout", false);
             hookRowMethods(rowClass, "onAttachedToWindow", false);
             hookRowMethods(rowClass, "onDetachedFromWindow", false);
+            hookRowMethods(rowClass, "setHeadsUpAnimatingAway", false);
             hookRowMethods(rowClass, "onNotificationUpdated", true);
             hookRowMethods(rowClass, "setBubbleClickListener", true);
             Log.i(TAG, "Hooked ExpandableNotificationRow Heads-up lifecycle OK");
         } catch (Throwable t) {
             Log.e(TAG, "Hook ExpandableNotificationRow lifecycle: " + t.getMessage());
+        }
+        hookHeadsUpManagerLifecycle(cl);
+    }
+
+    private void hookHeadsUpManagerLifecycle(ClassLoader cl) {
+        try {
+            Class<?> managerClass = cl.loadClass(
+                    "com.android.systemui.statusbar.notification.headsup.HeadsUpManagerImpl");
+            Set<String> hooked = new HashSet<>();
+            for (Class<?> type = managerClass; type != null; type = type.getSuperclass()) {
+                for (Method method : type.getDeclaredMethods()) {
+                    if (!"onEntryAnimatingAwayEnded".equals(method.getName())
+                            || method.getParameterCount() != 1
+                            || !hooked.add(method.toGenericString())) continue;
+                    method.setAccessible(true);
+                    hook(method).intercept(chain -> {
+                        Object result = chain.proceed();
+                        launchPendingForEntry(chain.getArg(0));
+                        return result;
+                    });
+                    Log.i(TAG, "Hooked HeadsUpManagerImpl.onEntryAnimatingAwayEnded OK");
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Hook HeadsUpManagerImpl animation callback: " + t.getMessage());
         }
     }
 
@@ -502,8 +531,14 @@ public class MoreBubbleHookModule extends XposedModule {
                         Object result = chain.proceed();
                         Object row = chain.getThisObject();
                         if ("onDetachedFromWindow".equals(name)) {
+                            cancelPendingForRow(row);
                             removeSwipeHandle(row);
                             return result;
+                        }
+                        if ("setHeadsUpAnimatingAway".equals(name)
+                                && method.getParameterCount() > 0
+                                && !Boolean.TRUE.equals(chain.getArg(0))) {
+                            launchPendingForRow(row);
                         }
                         if (refreshBubble) {
                             prepareBubbleMetadata(getNotificationEntryFromRow(row));
@@ -537,7 +572,13 @@ public class MoreBubbleHookModule extends XposedModule {
     private static void postHeadsUpRowSync(Object row) {
         if (!(row instanceof View)) return;
         View rowView = (View) row;
-        rowView.post(() -> syncHeadsUpSwipeHandle(row));
+        Runnable sync = () -> syncHeadsUpSwipeHandle(row);
+        rowView.post(sync);
+        // Heads-up rows can be added before their first constrained measure. Recheck during
+        // the first part of the pin animation so the handle receives a real row height.
+        rowView.postDelayed(sync, 48L);
+        rowView.postDelayed(sync, 160L);
+        rowView.postDelayed(sync, 320L);
     }
 
     private static void syncHeadsUpSwipeHandle(Object row) {
@@ -618,10 +659,16 @@ public class MoreBubbleHookModule extends XposedModule {
                         dp(ctx, ModuleSettings.getSwipeHandleLength(ctx) + 24),
                         dp(ctx, 30), Gravity.TOP | Gravity.CENTER_HORIZONTAL);
                 lp.topMargin = 0;
-                host.addView(newHandle, lp);
+                addHandleToRow(host, newHandle, lp);
                 handle = newHandle;
                 Log.i(TAG, "Heads-up swipe handle attached to "
                         + host.getClass().getSimpleName());
+            }
+            if (handle.getParent() != host) {
+                if (handle.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) handle.getParent()).removeView(handle);
+                }
+                addHandleToRow(host, handle, null);
             }
             positionSwipeHandle(host, handle, ctx);
             handle.bringToFront();
@@ -676,6 +723,20 @@ public class MoreBubbleHookModule extends XposedModule {
             lp.topMargin = topMargin;
             if (changed) handle.setLayoutParams(lp);
             handle.setX(Math.max(0, (host.getWidth() - width) / 2f));
+        }
+    }
+
+    private static void addHandleToRow(ViewGroup host, View handle,
+            FrameLayout.LayoutParams initialParams) {
+        if (host instanceof FrameLayout) {
+            host.addView(handle, initialParams != null
+                    ? initialParams : new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        } else {
+            host.addView(handle, initialParams != null
+                    ? new ViewGroup.MarginLayoutParams(initialParams.width, initialParams.height)
+                    : new ViewGroup.MarginLayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         }
     }
 
@@ -771,36 +832,127 @@ public class MoreBubbleHookModule extends XposedModule {
     private static boolean openNotificationFromHeadsUp(View handle) {
         try {
             Object row = getHeadsUpRowFromHandle(handle);
-            boolean launched = openNotificationForRow(handle.getContext(), row, "Heads-up swipe");
-            if (launched) {
-                removeHeadsUpPopupAfterOpen(row);
+            Object sbn = getNotificationSbnFromRow(row);
+            Object entry = getNotificationEntryFromRow(row);
+            if (sbn == null) return false;
+            String key = getNotificationKey(sbn);
+            PendingHeadsUpLaunch pending = key != null
+                    ? new PendingHeadsUpLaunch(handle.getContext(), row, sbn, entry,
+                    "Heads-up swipe") : null;
+            if (pending != null) sPendingHeadsUpLaunches.put(key, pending);
+            if (requestHeadsUpPopupRemoval(row)) {
+                // Launch only after the row/manager reports that the normal removal
+                // animation has finished while the original row is still valid.
+                if (pending != null) {
+                    waitForHeadsUpRemoval(pending, 0);
+                }
+                return true;
             }
-            return launched;
+            if (pending != null) sPendingHeadsUpLaunches.remove(key, pending);
+            return openNotificationForSnapshot(handle.getContext(), sbn, entry,
+                    "Heads-up swipe");
         } catch (Throwable t) {
             Log.w(TAG, "Heads-up swipe open: " + t.getMessage());
             return false;
         }
     }
 
-    private static void removeHeadsUpPopupAfterOpen(Object row) {
-        if (row == null) return;
+    private static boolean requestHeadsUpPopupRemoval(Object row) {
+        if (row == null) return false;
         try {
             Object sbn = getNotificationSbnFromRow(row);
             Object keyValue = sbn != null ? invokeSystemUi(sbn, "getKey") : null;
-            if (!(keyValue instanceof String)) return;
+            if (!(keyValue instanceof String)) return false;
             String key = (String) keyValue;
             Object manager = getHeadsUpManager(row);
             if (manager != null && removeHeadsUpEntry(manager, key)) {
-                Log.i(TAG, "Removed Heads-up popup after opening " + key);
-                return;
+                Log.i(TAG, "Requested normal Heads-up removal before opening " + key);
+                return true;
             }
             Log.w(TAG, "Heads-up manager unavailable; leaving popup lifecycle to SystemUI");
         } catch (Throwable t) {
-            Log.w(TAG, "Remove Heads-up popup failed: " + t.getMessage());
+            Log.w(TAG, "Request Heads-up removal failed: " + t.getMessage());
+        }
+        return false;
+    }
+
+    private static void waitForHeadsUpRemoval(PendingHeadsUpLaunch pending, int attempt) {
+        if (pending == null || pending.started
+                || sPendingHeadsUpLaunches.get(pending.key) != pending) return;
+        boolean stillHeadsUp = isHeadsUpRow(pending.row);
+        if (!stillHeadsUp) {
+            launchPendingHeadsUp(pending);
+            return;
+        }
+        new android.os.Handler(Looper.getMainLooper()).postDelayed(
+                () -> waitForHeadsUpRemoval(pending, attempt + 1), 16L);
+    }
+
+    private static void launchPendingForRow(Object row) {
+        String key = getNotificationKey(getNotificationSbnFromRow(row));
+        if (key == null) return;
+        PendingHeadsUpLaunch pending = sPendingHeadsUpLaunches.get(key);
+        if (pending != null && pending.row == row) launchPendingHeadsUp(pending);
+    }
+
+    private static void launchPendingForEntry(Object entry) {
+        Object sbn = entry != null ? getFieldSystemUi(entry, "mSbn") : null;
+        String key = getNotificationKey(sbn);
+        if (key == null) return;
+        PendingHeadsUpLaunch pending = sPendingHeadsUpLaunches.get(key);
+        if (pending != null && pending.entry == entry) launchPendingHeadsUp(pending);
+    }
+
+    private static void cancelPendingForRow(Object row) {
+        String key = getNotificationKey(getNotificationSbnFromRow(row));
+        if (key == null) return;
+        PendingHeadsUpLaunch pending = sPendingHeadsUpLaunches.get(key);
+        if (pending != null && pending.row == row) {
+            sPendingHeadsUpLaunches.remove(key, pending);
         }
     }
 
+    private static void launchPendingHeadsUp(String key) {
+        PendingHeadsUpLaunch pending = sPendingHeadsUpLaunches.get(key);
+        launchPendingHeadsUp(pending);
+    }
+
+    private static void launchPendingHeadsUp(PendingHeadsUpLaunch pending) {
+        if (pending == null || pending.started
+                || !sPendingHeadsUpLaunches.remove(pending.key, pending)) return;
+        pending.started = true;
+        openNotificationForSnapshot(pending.context, pending.sbn, pending.entry,
+                pending.reason);
+    }
+
+    private static String getNotificationKey(Object sbn) {
+        Object key = sbn != null ? invokeSystemUi(sbn, "getKey") : null;
+        return key instanceof String ? (String) key : null;
+    }
+
+    private static boolean openNotificationForSnapshot(Context ctx, Object sbn,
+            Object entry, String reason) {
+        if (sbn == null) return false;
+        if (isFreeformOpenMode(ctx)) {
+            if (launchNotificationInFreeformSbn(ctx, sbn, reason)) return true;
+            Log.i(TAG, reason + ": freeform unavailable, falling back to Bubble");
+        }
+        if (entry != null && sBubblesManager != null
+                && expandAppBubbleFromNotification(sBubblesManager, entry, reason)) {
+            return true;
+        }
+        boolean launched = launchNotificationFullscreenSbn(sbn, reason);
+        if (entry == null) {
+            Log.w(TAG, reason + ": NotificationEntry unavailable; used direct Intent fallback");
+        } else if (sBubblesManager == null) {
+            Log.w(TAG, reason + ": BubblesManager is not ready");
+        }
+        return launched;
+    }
+
     private static Object getHeadsUpManager(Object row) {
+        Object directManager = getFieldSystemUi(row, "mHeadsUpManager");
+        if (directManager != null) return directManager;
         try {
             ClassLoader cl = row.getClass().getClassLoader();
             String[] names = {
@@ -822,43 +974,62 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static boolean removeHeadsUpEntry(Object manager, String key) {
-        Method fallback = null;
+        Method selected = null;
         for (Class<?> type = manager.getClass(); type != null; type = type.getSuperclass()) {
             for (Method method : type.getDeclaredMethods()) {
+                Class<?>[] types = method.getParameterTypes();
                 if (!"removeNotification".equals(method.getName())
-                        || method.getParameterCount() < 2
-                        || method.getParameterTypes()[0] != String.class) {
+                        || types.length < 2 || types[0] != String.class) {
                     continue;
                 }
+                boolean supported = true;
+                for (int i = 1; i < types.length; i++) {
+                    if (types[i] != boolean.class && types[i] != Boolean.class
+                            && types[i] != String.class) {
+                        supported = false;
+                        break;
+                    }
+                }
+                if (!supported) continue;
                 method.setAccessible(true);
-                if (method.getParameterCount() == 2) {
-                    fallback = method;
+                if (types.length == 4 && types[1] == boolean.class
+                        && types[2] == boolean.class && types[3] == String.class) {
+                    selected = method;
                     break;
                 }
-                if (fallback == null) fallback = method;
+                if (selected == null && types.length == 3
+                        && types[1] == boolean.class && types[2] == String.class) {
+                    selected = method;
+                } else if (selected == null && types.length == 2
+                        && types[1] == boolean.class) {
+                    selected = method;
+                }
             }
-            if (fallback != null && fallback.getParameterCount() == 2) break;
+            if (selected != null && selected.getParameterCount() == 4) break;
         }
-        if (fallback == null) return false;
+        if (selected == null) return false;
         try {
-            Class<?>[] types = fallback.getParameterTypes();
+            Class<?>[] types = selected.getParameterTypes();
             Object[] args = new Object[types.length];
             args[0] = key;
-            int booleanIndex = 0;
             for (int i = 1; i < types.length; i++) {
                 if (types[i] == boolean.class || types[i] == Boolean.class) {
-                    // The first boolean is releaseImmediately. Keep it false so SystemUI
-                    // can run its normal removal animation; an optional second boolean is
-                    // the explicit animate flag.
-                    args[i] = booleanIndex++ == 0 ? false : true;
+                    // Skip the minimum HUN dwell time, but keep SystemUI's normal
+                    // going-away animation. Evolution17's four-arg overload is preferred.
+                    args[i] = true;
                 } else if (types[i] == String.class) {
                     args[i] = "MoreBubbleButton swipe";
                 } else {
                     return false;
                 }
             }
-            Object result = fallback.invoke(manager, args);
-            return !(result instanceof Boolean) || Boolean.TRUE.equals(result);
+            Object result = selected.invoke(manager, args);
+            Log.i(TAG, "HeadsUpManager.removeNotification invoked key=" + key
+                    + " result=" + result + " args=" + types.length);
+            // false means the manager queued a normal removal after the dwell time;
+            // invocation itself is still successful and the completion callback/poll
+            // controls when the target is launched.
+            return true;
         } catch (Throwable t) {
             Log.w(TAG, "HeadsUpManager.removeNotification failed: " + t.getMessage());
             return false;
@@ -1559,6 +1730,26 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
+    private static final class PendingHeadsUpLaunch {
+        final Context context;
+        final Object row;
+        final Object sbn;
+        final Object entry;
+        final String key;
+        final String reason;
+        boolean started;
+
+        PendingHeadsUpLaunch(Context context, Object row, Object sbn, Object entry,
+                String reason) {
+            this.context = context;
+            this.row = row;
+            this.sbn = sbn;
+            this.entry = entry;
+            this.key = getNotificationKey(sbn);
+            this.reason = reason;
+        }
+    }
+
     private static final class SwipeHandleView extends View {
         private final Paint barPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
@@ -1569,6 +1760,14 @@ public class MoreBubbleHookModule extends XposedModule {
             setFocusable(false);
             barPaint.setColor(0xB85F6368);
             setMinimumHeight(dp(context, 30));
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            Context context = getContext();
+            setMeasuredDimension(
+                    dp(context, ModuleSettings.getSwipeHandleLength(context) + 24),
+                    dp(context, 30));
         }
 
         @Override
