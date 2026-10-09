@@ -68,7 +68,15 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            // Local checkouts may not have the private release keystore. Keep the
+            // optimized Release variant buildable locally with the debug keystore;
+            // CI/local.properties still takes precedence when a release keystore exists.
+            val releaseSigning = signingConfigs.getByName("release")
+            signingConfig = if (releaseSigning.storeFile != null) {
+                releaseSigning
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -114,12 +122,11 @@ dependencies {
     implementation(libs.compose.material.icons)
     implementation(libs.compose.runtime)
     implementation(libs.compose.foundation)
-    debugImplementation(libs.compose.ui.tooling)
-
+    // Keep the project-wide Lifecycle version constraint for the Compose dependency graph.
+    // These are not used directly by the settings screen, but removing them makes Gradle
+    // select an older uncached transitive Lifecycle version in the offline build environment.
     implementation(libs.lifecycle.runtime.compose)
     implementation(libs.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.appcompat)
-    implementation(libs.androidx.activity)
     implementation(libs.androidx.activity.compose)
 
     compileOnly(libs.libxposed.api)

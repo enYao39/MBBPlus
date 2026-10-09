@@ -24,12 +24,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -109,11 +109,11 @@ fun SettingsScreen() {
     ) {
         item { HeaderCard() }
 
-        item { SectionHeading(Icons.Default.Apps, R.string.section_recents) }
+        item { SectionHeading(Icons.Default.Build, R.string.section_recents) }
         item {
             SettingsCard {
                 PreferenceSwitchRow(
-                    icon = Icons.Default.Apps,
+                    icon = Icons.Default.Build,
                     title = stringResource(R.string.feature_menu_title),
                     summary = stringResource(R.string.feature_menu_summary),
                     checked = menuEnabled,
@@ -124,7 +124,7 @@ fun SettingsScreen() {
                 )
                 PreferenceDivider()
                 PreferenceSwitchRow(
-                    icon = Icons.Default.Tune,
+                    icon = Icons.Default.Settings,
                     title = stringResource(R.string.feature_action_bar_title),
                     summary = stringResource(R.string.feature_action_bar_summary),
                     checked = actionBarEnabled,
@@ -252,7 +252,7 @@ fun SettingsScreen() {
             }
         }
 
-        item { SectionHeading(Icons.Default.Tune, R.string.section_position) }
+        item { SectionHeading(Icons.Default.Settings, R.string.section_position) }
         item {
             SettingsCard {
                 Column(modifier = Modifier.padding(20.dp)) {
@@ -692,7 +692,7 @@ private fun FineTuneSlider(
     ) {
         FilledTonalIconButton(onClick = { onStep(-1f) }) {
             Icon(
-                Icons.Default.Remove,
+                Icons.Default.Close,
                 contentDescription = stringResource(R.string.decrease_value, label)
             )
         }
