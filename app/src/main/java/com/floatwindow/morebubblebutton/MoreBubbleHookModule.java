@@ -52,6 +52,7 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final int VISIBLE_TYPE_HEADS_UP = 2;
     private static final long SWIPE_HANDLE_MIN_DISTANCE_DP = 24L;
     private static final String LMO_FREEFORM_SERVICE = "lmo_freeform";
+    private static final String UNEXPANDED_ACTION_TAG = "more_bubble_unexpanded_action";
     private static final String LMO_FREEFORM_DESCRIPTOR =
             "com.libremobileos.freeform.ILMOFreeformUIService";
     private static final int LMO_START_APP_TRANSACTION = 1;
@@ -152,6 +153,17 @@ public class MoreBubbleHookModule extends XposedModule {
                 updateHeadsUpSwipeHandle(chain.getThisObject());
                 return result;
             });
+            try {
+                Method setContractedChild = clazz.getMethod("setContractedChild", View.class);
+                hook(setContractedChild).intercept(chain -> {
+                    Object result = chain.proceed();
+                    updateHeadsUpSwipeHandle(chain.getThisObject());
+                    return result;
+                });
+                Log.i(TAG, "Hooked NotificationContentView.setContractedChild OK");
+            } catch (Throwable t) {
+                Log.w(TAG, "Hook setContractedChild: " + t.getMessage());
+            }
             Method selectLayout = clazz.getMethod("selectLayout", boolean.class, boolean.class);
             hook(selectLayout).intercept(chain -> {
                 Object result = chain.proceed();
@@ -407,6 +419,83 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     /**
+     * The stock Bubble action is normally placed in the expanded notification action row.
+     * Add a compact equivalent to the contracted child so the selected action is available
+     * without expanding the notification first. If SystemUI already exposes a visible native
+     * action, keep it and do not create a duplicate.
+     */
+    private static void updateUnexpandedNotificationAction(Object contentViewObject,
+            Notification notification, boolean isHeadsUp) {
+        if (!(contentViewObject instanceof ViewGroup)) return;
+        ViewGroup contentView = (ViewGroup) contentViewObject;
+        Object contractedObject = getFieldSystemUi(contentViewObject, "mContractedChild");
+        View contracted = contractedObject instanceof View ? (View) contractedObject : null;
+        if (!(contracted instanceof ViewGroup)) return;
+        ViewGroup contractedGroup = (ViewGroup) contracted;
+        View action = contractedGroup.findViewWithTag(UNEXPANDED_ACTION_TAG);
+        Context ctx = contentView.getContext();
+        boolean enabled = ModuleSettings.isSystemUiBubbleEnabled(ctx);
+        boolean validNotification = notification != null
+                && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
+                && notification.contentIntent != null;
+        View nativeIcon = contractedGroup.findViewById(0x01020281);
+        boolean nativeActionVisible = nativeIcon != null && nativeIcon.isShown();
+
+        if (!enabled || isHeadsUp || !validNotification || nativeActionVisible) {
+            if (action != null) action.setVisibility(View.GONE);
+            return;
+        }
+        if (!(contractedGroup instanceof FrameLayout)) {
+            Log.w(TAG, "Unexpanded action skipped: contracted child is not FrameLayout");
+            return;
+        }
+
+        if (action == null) {
+            android.widget.ImageButton button = new android.widget.ImageButton(ctx);
+            button.setTag(UNEXPANDED_ACTION_TAG);
+            button.setBackground(null);
+            button.setPadding(dp(ctx, 6), dp(ctx, 6), dp(ctx, 6), dp(ctx, 6));
+            button.setScaleType(android.widget.ImageView.ScaleType.CENTER_INSIDE);
+            button.setOnClickListener(v -> openNotificationFromContentView(contentViewObject));
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    dp(ctx, 40), dp(ctx, 40), Gravity.END | Gravity.CENTER_VERTICAL);
+            lp.setMarginEnd(dp(ctx, 8));
+            contractedGroup.addView(button, lp);
+            action = button;
+            Log.i(TAG, "Added action to contracted notification child");
+        }
+        android.graphics.drawable.Drawable icon = getUnexpandedActionIcon(ctx);
+        if (icon == null) {
+            action.setVisibility(View.GONE);
+            return;
+        }
+        if (action instanceof android.widget.ImageButton) {
+            android.widget.ImageButton button = (android.widget.ImageButton) action;
+            button.setImageDrawable(icon);
+            button.setContentDescription(getConfiguredOpenLabel(ctx));
+            button.setTooltipText(getConfiguredOpenLabel(ctx));
+        }
+        action.setVisibility(View.VISIBLE);
+        action.bringToFront();
+    }
+
+    private static android.graphics.drawable.Drawable getUnexpandedActionIcon(Context ctx) {
+        if (isFreeformOpenMode(ctx)) {
+            return getFreeformActionIcon(ctx, ctx.getResources(), ctx.getPackageName());
+        }
+        try {
+            int iconId = ctx.getResources().getIdentifier(
+                    "bubble_ic_create_bubble", "drawable", "com.android.systemui");
+            if (iconId != 0) {
+                return ctx.getResources().getDrawable(iconId, ctx.getTheme()).mutate();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Bubble icon load failed: " + t.getMessage());
+        }
+        return null;
+    }
+
+    /**
      * Adds the small bottom-center handle only to a real Heads-up popup row.
      * Evolution17 leaves NotificationContentView.mHeadsUpChild empty, so the row is the
      * stable host and the strict row state keeps the handle out of the notification shade.
@@ -429,6 +518,7 @@ public class MoreBubbleHookModule extends XposedModule {
             boolean validNotification = notification != null
                     && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
                     && notification.contentIntent != null;
+            updateUnexpandedNotificationAction(contentViewObject, notification, isHeadsUp);
 
             // Evolution17 keeps mHeadsUpChild null and renders the Heads-up content through
             // the row's entry adapter. Do not use that legacy child as a visibility gate.
@@ -465,10 +555,15 @@ public class MoreBubbleHookModule extends XposedModule {
                     public boolean onTouch(View v, MotionEvent event) {
                         switch (event.getActionMasked()) {
                             case MotionEvent.ACTION_DOWN:
+                                // The shade's parent normally interprets a downward gesture as
+                                // notification-panel expansion. Claim the gesture before the
+                                // first MOVE so the handle receives the complete swipe.
+                                requestDisallowParentIntercept(v, true);
                                 downY = event.getY();
                                 opened = false;
                                 return true;
                             case MotionEvent.ACTION_MOVE:
+                                requestDisallowParentIntercept(v, true);
                                 if (!opened && event.getY() - downY >= swipeDistance(v.getContext())) {
                                     opened = true;
                                     openNotificationFromHeadsUp(v);
@@ -480,9 +575,11 @@ public class MoreBubbleHookModule extends XposedModule {
                                     openNotificationFromHeadsUp(v);
                                 }
                                 v.performClick();
+                                requestDisallowParentIntercept(v, false);
                                 return true;
                             case MotionEvent.ACTION_CANCEL:
                                 opened = false;
+                                requestDisallowParentIntercept(v, false);
                                 return true;
                             default:
                                 return true;
@@ -579,30 +676,53 @@ public class MoreBubbleHookModule extends XposedModule {
                 android.view.ViewConfiguration.get(ctx).getScaledTouchSlop() * 2f);
     }
 
+    private static void requestDisallowParentIntercept(View view, boolean disallow) {
+        try {
+            if (view.getParent() != null) {
+                view.getParent().requestDisallowInterceptTouchEvent(disallow);
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static void openNotificationFromContentView(Object contentViewObject) {
+        try {
+            Context ctx = contentViewObject instanceof View
+                    ? ((View) contentViewObject).getContext() : null;
+            Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
+            if (ctx != null) openNotificationForRow(ctx, row, "Unexpanded notification");
+        } catch (Throwable t) {
+            Log.w(TAG, "Unexpanded notification open: " + t.getMessage());
+        }
+    }
+
     private static void openNotificationFromHeadsUp(View handle) {
         try {
             Object row = getHeadsUpRowFromHandle(handle);
-            Object sbn = getNotificationSbnFromRow(row);
-            Object entry = getNotificationEntryFromRow(row);
-            if (sbn == null) return;
-            if (isFreeformOpenMode(handle.getContext())) {
-                if (launchNotificationInFreeformSbn(handle.getContext(), sbn,
-                        "Heads-up swipe")) return;
-                Log.i(TAG, "Heads-up swipe: freeform unavailable, falling back to Bubble");
-            }
-            if (entry != null && sBubblesManager != null
-                    && expandAppBubbleFromNotification(sBubblesManager, entry, "Heads-up swipe")) {
-                return;
-            }
-            launchNotificationFullscreenSbn(sbn, "Heads-up swipe");
-            if (entry == null) {
-                Log.w(TAG, "Heads-up swipe: NotificationEntry unavailable; used direct Intent fallback");
-            } else if (sBubblesManager == null) {
-                Log.w(TAG, "Heads-up swipe: BubblesManager is not ready");
-            }
+            openNotificationForRow(handle.getContext(), row, "Heads-up swipe");
         } catch (Throwable t) {
             Log.w(TAG, "Heads-up swipe open: " + t.getMessage());
         }
+    }
+
+    private static boolean openNotificationForRow(Context ctx, Object row, String reason) {
+        Object sbn = getNotificationSbnFromRow(row);
+        Object entry = getNotificationEntryFromRow(row);
+        if (sbn == null) return false;
+        if (isFreeformOpenMode(ctx)) {
+            if (launchNotificationInFreeformSbn(ctx, sbn, reason)) return true;
+            Log.i(TAG, reason + ": freeform unavailable, falling back to Bubble");
+        }
+        if (entry != null && sBubblesManager != null
+                && expandAppBubbleFromNotification(sBubblesManager, entry, reason)) {
+            return true;
+        }
+        boolean launched = launchNotificationFullscreenSbn(sbn, reason);
+        if (entry == null) {
+            Log.w(TAG, reason + ": NotificationEntry unavailable; used direct Intent fallback");
+        } else if (sBubblesManager == null) {
+            Log.w(TAG, reason + ": BubblesManager is not ready");
+        }
+        return launched;
     }
 
     private static boolean launchNotificationInFreeform(Context ctx, Object entry, String reason) {
