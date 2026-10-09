@@ -405,7 +405,6 @@ public class MoreBubbleHookModule extends XposedModule {
         hookContentMethod(contentViewClass, "onLayout");
         hookContentMethod(contentViewClass, "onNotificationUpdated");
         hookContentMethod(contentViewClass, "setBubbleClickListener");
-        hookContentMethod(contentViewClass, "updateBubbleButton");
     }
 
     private void hookContentMethod(Class<?> targetClass, String name) {
@@ -421,15 +420,13 @@ public class MoreBubbleHookModule extends XposedModule {
                 try {
                     method.setAccessible(true);
                     hook(method).intercept(chain -> {
-                        Object contentView = chain.getThisObject();
-                        boolean isUpdate = "onNotificationUpdated".equals(name) || "setBubbleClickListener".equals(name) || "updateBubbleButton".equals(name);
-                        if (isUpdate) {
-                            prepareBubbleMetadata(getNotificationEntryFromRow(getFieldSystemUi(contentView, "mContainingNotification")));
-                        }
                         Object result = chain.proceed();
+                        Object contentView = chain.getThisObject();
                         updateHeadsUpSwipeHandle(contentView);
-                        if (isUpdate) {
-                            refreshBubbleButton(getFieldSystemUi(contentView, "mContainingNotification"));
+                        if ("onNotificationUpdated".equals(name)
+                                || "setBubbleClickListener".equals(name)) {
+                            refreshBubbleButton(getFieldSystemUi(
+                                    contentView, "mContainingNotification"));
                         }
                         return result;
                     });
@@ -447,17 +444,16 @@ public class MoreBubbleHookModule extends XposedModule {
         try {
             Class<?> rowClass = cl.loadClass(
                     "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow");
-            hookRowMethods(rowClass, "setHeadsUp", true);
+            hookRowMethods(rowClass, "setHeadsUp", false);
             hookRowMethods(rowClass, "onLayout", false);
-            hookRowMethods(rowClass, "onAttachedToWindow", true);
+            hookRowMethods(rowClass, "onAttachedToWindow", false);
             hookRowMethods(rowClass, "onDetachedFromWindow", false);
-            hookRowMethods(rowClass, "setUserExpanded", true);
+            hookRowMethods(rowClass, "setUserExpanded", false);
             hookRowMethods(rowClass, "setUserSwipingToExpandRow", false);
             hookRowMethods(rowClass, "setOnKeyguard", false);
             hookRowMethods(rowClass, "setHeadsUpAnimatingAway", false);
             hookRowMethods(rowClass, "onNotificationUpdated", true);
             hookRowMethods(rowClass, "setBubbleClickListener", true);
-            hookRowMethods(rowClass, "updateBubbleButton", true);
             Log.i(TAG, "Hooked ExpandableNotificationRow Heads-up lifecycle OK");
         } catch (Throwable t) {
             Log.e(TAG, "Hook ExpandableNotificationRow lifecycle: " + t.getMessage());
@@ -527,11 +523,8 @@ public class MoreBubbleHookModule extends XposedModule {
                 try {
                     method.setAccessible(true);
                     hook(method).intercept(chain -> {
-                        Object row = chain.getThisObject();
-                        if (refreshBubble) {
-                            prepareBubbleMetadata(getNotificationEntryFromRow(row));
-                        }
                         Object result = chain.proceed();
+                        Object row = chain.getThisObject();
                         if ("onDetachedFromWindow".equals(name)) {
                             cancelHeadsUpRowSync(row);
                             untrackHeadsUpRow(row);
@@ -567,6 +560,7 @@ public class MoreBubbleHookModule extends XposedModule {
                             return result;
                         }
                         if (refreshBubble) {
+                            prepareBubbleMetadata(getNotificationEntryFromRow(row));
                             refreshBubbleButton(row);
                         }
                         postHeadsUpRowSync(row);
