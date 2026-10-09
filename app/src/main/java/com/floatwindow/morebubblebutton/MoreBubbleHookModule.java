@@ -29,9 +29,11 @@ import android.widget.LinearLayout;
 import android.widget.Toast;
 
 import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import io.github.libxposed.api.XposedModule;
@@ -558,6 +560,14 @@ public class MoreBubbleHookModule extends XposedModule {
         if (android.os.Process.myUid() == android.os.Process.SYSTEM_UID
                 && launchNotificationViaLmoBinder(ctx, sbn, notification, reason)) return true;
 
+        // Evolution's own SystemUI uses the hidden ActivityOptions.setLaunchTaskId() API
+        // to deliver a later PendingIntent into an already-created task. Start the
+        // resolved component in LMO Freeform first, then inject the exact notification
+        // PendingIntent into that task to avoid the temporary fullscreen transition.
+        if (launchNotificationViaLmoComponentThenIntent(ctx, sbn, notification, reason)) {
+            return true;
+        }
+
         // SystemUI cannot call the LMO Binder service directly. Stage the exact
         // notification PendingIntent behind the current task, then ask the
         // exported system-UID receiver to move that task into an LMO Freeform
@@ -566,6 +576,95 @@ public class MoreBubbleHookModule extends XposedModule {
         if (launchNotificationByTaskMove(ctx, sbn, notification, reason)) return true;
 
         return launchNotificationViaLmoComponent(ctx, sbn, notification, reason);
+    }
+
+    private static boolean launchNotificationViaLmoComponentThenIntent(Context ctx, Object sbn,
+            Notification notification, String reason) {
+        if (notification == null || notification.contentIntent == null) return false;
+
+        try {
+            Method setLaunchTaskId = findMethodSystemUi(ActivityOptions.class,
+                    "setLaunchTaskId", int.class);
+            if (setLaunchTaskId == null) {
+                Log.w(TAG, reason + ": LMO two-stage launch unavailable: setLaunchTaskId missing");
+                return false;
+            }
+
+            String packageName = (String) sbn.getClass().getMethod("getPackageName").invoke(sbn);
+            if (packageName == null) return false;
+            Intent targetIntent = getNotificationTargetIntent(notification, packageName);
+            ComponentName component = targetIntent != null ? targetIntent.getComponent() : null;
+            if (component == null && targetIntent != null) {
+                component = targetIntent.resolveActivity(ctx.getPackageManager());
+            }
+            if (component == null) {
+                Log.w(TAG, reason + ": LMO two-stage target activity not resolved");
+                return false;
+            }
+
+            int userId = getNotificationUserId(sbn);
+            List<?> tasksBefore = getRunningTasks(ctx);
+            if (tasksBefore == null) return false;
+            final Set<Integer> taskIdsBefore = collectTaskIds(tasksBefore);
+
+            Intent startFreeform = new Intent("com.libremobileos.freeform.START_FREEFORM")
+                    .setComponent(new ComponentName(
+                            "com.libremobileos.freeform",
+                            "com.libremobileos.freeform.receiver.StartFreeformReceiver"))
+                    .putExtra("packageName", component.getPackageName())
+                    .putExtra("activityName", component.getClassName())
+                    .putExtra("userId", userId)
+                    .putExtra("taskId", -1);
+            UserHandle user = getUserHandle(userId);
+            if (user == null) return false;
+            ctx.sendBroadcastAsUser(startFreeform, user);
+
+            final ComponentName finalComponent = component;
+            final String finalPackageName = packageName;
+            final long launchTime = SystemClock.uptimeMillis();
+            Thread injector = new Thread(() -> deliverNotificationIntentToLmoTask(
+                    notification.contentIntent, ctx, finalPackageName, finalComponent,
+                    taskIdsBefore, launchTime, setLaunchTaskId, reason),
+                    "MoreBubble-LMO-intent-injector");
+            injector.start();
+            Log.i(TAG, reason + ": requested LMO Freeform component first; "
+                    + "notification Intent will be injected after task creation for "
+                    + finalComponent.flattenToShortString());
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": LMO two-stage launch failed: " + t.getMessage());
+        }
+        return false;
+    }
+
+    private static void deliverNotificationIntentToLmoTask(PendingIntent pendingIntent,
+            Context ctx, String packageName, ComponentName component, Set<Integer> taskIdsBefore,
+            long launchTime, Method setLaunchTaskId, String reason) {
+        try {
+            int taskId = waitForNewLmoTask(ctx, packageName, component, taskIdsBefore,
+                    launchTime);
+            if (taskId < 0) {
+                Log.w(TAG, reason + ": LMO two-stage task was not created");
+                return;
+            }
+
+            ActivityOptions options = ActivityOptions.makeBasic();
+            setLaunchTaskId.invoke(options, taskId);
+            setPendingIntentBackgroundStartAllowed(options);
+            Method avoidMoveToFront = findMethodSystemUi(options.getClass(),
+                    "setAvoidMoveToFront");
+            if (avoidMoveToFront != null) avoidMoveToFront.invoke(options);
+
+            pendingIntent.send(options.toBundle());
+            Log.i(TAG, reason + ": launched component in LMO Freeform, then delivered "
+                    + "notification Intent into taskId=" + taskId + " for "
+                    + component.flattenToShortString());
+        } catch (PendingIntent.CanceledException e) {
+            Log.w(TAG, reason + ": notification PendingIntent canceled in LMO two-stage launch");
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": LMO two-stage Intent injection failed: "
+                    + t.getMessage());
+        }
     }
 
     private static boolean launchNotificationViaLmoComponent(Context ctx, Object sbn,
@@ -734,6 +833,62 @@ public class MoreBubbleHookModule extends XposedModule {
             SystemClock.sleep(80L);
         }
         return -1;
+    }
+
+    private static int waitForNewLmoTask(Context ctx, String packageName,
+            ComponentName target, Set<Integer> taskIdsBefore, long launchTime) {
+        long deadline = SystemClock.uptimeMillis() + 2200L;
+        while (SystemClock.uptimeMillis() < deadline) {
+            List<?> tasks = getRunningTasks(ctx);
+            if (tasks == null) return -1;
+            int taskId = findNewLmoTask(tasks, packageName, target, taskIdsBefore, launchTime);
+            if (taskId >= 0) return taskId;
+            SystemClock.sleep(80L);
+        }
+        return -1;
+    }
+
+    private static Set<Integer> collectTaskIds(List<?> tasks) {
+        Set<Integer> ids = new HashSet<>();
+        for (Object task : tasks) {
+            try {
+                ids.add(task.getClass().getField("taskId").getInt(task));
+            } catch (Throwable ignored) {}
+        }
+        return ids;
+    }
+
+    private static int findNewLmoTask(List<?> tasks, String packageName,
+            ComponentName target, Set<Integer> taskIdsBefore, long launchTime) {
+        int fallbackTaskId = -1;
+        long fallbackActiveTime = Long.MIN_VALUE;
+        for (Object task : tasks) {
+            try {
+                int taskId = task.getClass().getField("taskId").getInt(task);
+                if (taskIdsBefore.contains(taskId)) continue;
+                ComponentName top = (ComponentName) task.getClass()
+                        .getField("topActivity").get(task);
+                ComponentName base = (ComponentName) task.getClass()
+                        .getField("baseActivity").get(task);
+                ComponentName match = top != null ? top : base;
+                if (match == null || !packageName.equals(match.getPackageName())) continue;
+                if (target != null && !target.getClassName().equals(match.getClassName())
+                        && (base == null || !target.getClassName().equals(base.getClassName()))) {
+                    continue;
+                }
+                long activeTime = Long.MIN_VALUE;
+                try {
+                    activeTime = task.getClass().getField("lastActiveTime").getLong(task);
+                } catch (Throwable ignored) {}
+                if (activeTime >= launchTime || fallbackTaskId < 0) {
+                    if (activeTime >= fallbackActiveTime) {
+                        fallbackTaskId = taskId;
+                        fallbackActiveTime = activeTime;
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        return fallbackTaskId;
     }
 
     private static int findNotificationTask(List<?> tasks, String packageName,
