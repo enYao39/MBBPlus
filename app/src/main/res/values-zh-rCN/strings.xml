@@ -3,7 +3,7 @@
     <string name="app_name">更多消息气泡</string>
     <string name="bubble_button_label">消息气泡</string>
     <string name="module_description">在 Pixel Launcher 最近任务和通知栏中添加消息气泡按钮。</string>
-    <string name="settings_subtitle">将支持的应用变为消息气泡。</string>
+    <string name="settings_subtitle">将支持的应用打开为气泡或自由窗口。</string>
     <string name="settings_language_auto">界面语言会跟随系统自动切换</string>
     <string name="section_recents">最近任务</string>
     <string name="section_notifications">通知</string>
@@ -11,11 +11,19 @@
     <string name="section_actions">操作</string>
     <string name="section_about">关于</string>
     <string name="feature_menu_title">任务卡片菜单</string>
-    <string name="feature_menu_summary">在任务卡片图标打开的菜单中显示“消息气泡”。</string>
+    <string name="feature_menu_summary">在任务卡片图标打开的菜单中显示“Bubble”。</string>
     <string name="feature_action_bar_title">底部操作栏</string>
-    <string name="feature_action_bar_summary">在最近任务界面的底部操作栏显示“消息气泡”。</string>
+    <string name="feature_action_bar_summary">在最近任务界面的底部操作栏显示“Bubble”。</string>
     <string name="feature_system_ui_title">通知气泡按钮</string>
     <string name="feature_system_ui_summary">为可以打开应用的普通通知显示气泡按钮。</string>
+    <string name="open_mode_title">打开方式</string>
+    <string name="open_mode_bubble">Bubble</string>
+    <string name="open_mode_freeform">自由窗口</string>
+    <string name="open_mode_summary">选择任务或通知的打开方式。自由窗口不可用时依次回退到 Bubble 和全屏。</string>
+    <string name="popup_presentation_title">Heads-up 操作方式</string>
+    <string name="popup_presentation_button">Bubble 按钮</string>
+    <string name="popup_presentation_handle">下滑横条</string>
+    <string name="popup_presentation_summary">Heads-up 中只显示一种操作方式。下滑横条即可打开。</string>
     <string name="position_mode_title">显示行</string>
     <string name="position_mode_follow">跟随原按钮</string>
     <string name="position_mode_second">第二行</string>
@@ -44,4 +52,6 @@
     <string name="compatibility_value">Android 16+ · LSPosed Modern API</string>
     <string name="about_language">支持中文和英文，语言会根据系统设置自动检测。</string>
     <string name="app_icon_description">更多消息气泡图标</string>
+    <string name="freeform_label">自由窗口</string>
+    <string name="freeform_unavailable">自由窗口不可用，已改用 Bubble。</string>
 </resources>

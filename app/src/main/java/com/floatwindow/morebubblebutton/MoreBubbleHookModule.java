@@ -1,17 +1,24 @@
 package com.floatwindow.morebubblebutton;
 
 import android.app.Notification;
+import android.app.ActivityOptions;
 import android.app.PendingIntent;
 import android.annotation.SuppressLint;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.UserHandle;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
@@ -36,6 +43,11 @@ public class MoreBubbleHookModule extends XposedModule {
     private View bubbleButton;
     private static View sSecondRow;
     private ClassLoader mLauncherClassLoader;
+    private static Object sBubblesManager;
+    private static final String HEADS_UP_HANDLE_TAG = "more_bubble_heads_up_handle";
+    private static final int WINDOWING_MODE_FREEFORM = 5;
+    private static final int VISIBLE_TYPE_HEADS_UP = 2;
+    private static final long SWIPE_HANDLE_MIN_DISTANCE_DP = 24L;
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -63,7 +75,8 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private void hookSystemUi(ClassLoader cl) {
         Log.i(TAG, "Hooking SystemUI...");
-        // 1. shouldShowBubbleButton: 让所有非前台通知显示气泡按钮
+        // 1. shouldShowBubbleButton: 让所有非前台通知显示气泡按钮。
+        //    横条模式与原生按钮互斥，所以这里必须强制隐藏原生按钮。
         try {
             Class<?> clazz = cl.loadClass(
                     "com.android.systemui.statusbar.notification.row.NotificationContentView");
@@ -72,6 +85,8 @@ public class MoreBubbleHookModule extends XposedModule {
                     Context ctx = null;
                     try { ctx = ((View) chain.getThisObject()).getContext(); } catch (Throwable ignored) {}
                     if (ctx != null && !ModuleSettings.isSystemUiBubbleEnabled(ctx)) return chain.proceed();
+                    if (ctx != null && ModuleSettings.getPopupPresentation(ctx)
+                            == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE) return false;
                 } catch (Throwable ignored) {}
                 boolean original = (boolean) chain.proceed();
                 if (original) return true;
@@ -93,6 +108,29 @@ public class MoreBubbleHookModule extends XposedModule {
                 } catch (Throwable t) { return true; }
             });
             Log.i(TAG, "Hooked shouldShowBubbleButton OK");
+
+            // Evolution17 仍使用 legacy NotificationContentView 作为 Heads-up 卡片容器。
+            // setHeadsUpChild() 负责替换 Heads-up 内容，selectLayout() 负责切换显示状态；
+            // 两处都刷新横条，避免内容重绑或 Heads-up 收起后残留。
+            Method setHeadsUpChild = clazz.getMethod("setHeadsUpChild", View.class);
+            hook(setHeadsUpChild).intercept(chain -> {
+                Object result = chain.proceed();
+                updateHeadsUpSwipeHandle(chain.getThisObject());
+                return result;
+            });
+            Method selectLayout = clazz.getMethod("selectLayout", boolean.class, boolean.class);
+            hook(selectLayout).intercept(chain -> {
+                Object result = chain.proceed();
+                updateHeadsUpSwipeHandle(chain.getThisObject());
+                return result;
+            });
+            Method attached = clazz.getMethod("onAttachedToWindow");
+            hook(attached).intercept(chain -> {
+                Object result = chain.proceed();
+                updateHeadsUpSwipeHandle(chain.getThisObject());
+                return result;
+            });
+            Log.i(TAG, "Hooked Heads-up swipe handle lifecycle OK");
         } catch (Throwable t) { Log.e(TAG, "Hook shouldShowBubbleButton: " + t.getMessage()); }
 
         // 2. injectBubbleMetadata at bind time
@@ -131,6 +169,7 @@ public class MoreBubbleHookModule extends XposedModule {
         // 3. BubblesManager.expandStackAndSelectBubble - 拦截系统点击调用
         try {
             Class<?> bubblesCls = cl.loadClass("com.android.systemui.wmshell.BubblesManager");
+            hookBubblesManagerConstructors(bubblesCls);
             java.lang.reflect.Method expand = null;
             for (java.lang.reflect.Method m : bubblesCls.getDeclaredMethods()) {
                 if (m.getName().equals("expandStackAndSelectBubble")
@@ -142,13 +181,16 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             if (expand != null) {
                 hook(expand).intercept(chain -> {
+                    sBubblesManager = chain.getThisObject();
                     try {
                         Object entry = chain.getArg(0);
                         if (entry != null) {
                             Object sbn = getFieldSystemUi(entry, "mSbn");
                             Notification notif = sbn != null ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
                             if (notif != null && (notif.flags & 0x40) == 0 && notif.contentIntent != null) {
-                                expandAppBubbleFromNotification(chain.getThisObject(), entry, "expand guard");
+                                if (!expandAppBubbleFromNotification(chain.getThisObject(), entry, "expand guard")) {
+                                    launchNotificationFullscreen(entry, "expand guard");
+                                }
                                 return null;
                             }
                         }
@@ -176,10 +218,14 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             if (onUserChanged != null) {
                 hook(onUserChanged).intercept(chain -> {
+                    sBubblesManager = chain.getThisObject();
                     try {
                         boolean enabled = (boolean) chain.getArg(1);
                         Object entry = chain.getArg(0);
-                        if (enabled && entry != null && expandAppBubbleFromNotification(chain.getThisObject(), entry, "user change")) {
+                        if (enabled && entry != null) {
+                            if (!expandAppBubbleFromNotification(chain.getThisObject(), entry, "user change")) {
+                                launchNotificationFullscreen(entry, "user change");
+                            }
                             return null;
                         }
                     } catch (Throwable t) { Log.w(TAG, "user change bubble: " + t.getMessage()); }
@@ -246,6 +292,410 @@ public class MoreBubbleHookModule extends XposedModule {
         Log.i(TAG, "All SystemUI hooks installed");
     }
 
+    private void hookBubblesManagerConstructors(Class<?> bubblesCls) {
+        try {
+            for (java.lang.reflect.Constructor<?> constructor : bubblesCls.getDeclaredConstructors()) {
+                hook(constructor).intercept(chain -> {
+                    Object result = chain.proceed();
+                    sBubblesManager = chain.getThisObject();
+                    return result;
+                });
+            }
+            Log.i(TAG, "Hooked BubblesManager constructors OK");
+        } catch (Throwable t) {
+            Log.w(TAG, "Hook BubblesManager constructors: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Adds the small bottom-center handle only to a real Heads-up content view.
+     * NotificationContentView is a FrameLayout with separate contracted/expanded/Heads-up
+     * children on Evolution17, so the handle stays inside the popup and disappears with it.
+     */
+    private static void updateHeadsUpSwipeHandle(Object contentViewObject) {
+        if (!(contentViewObject instanceof ViewGroup)) return;
+        ViewGroup contentView = (ViewGroup) contentViewObject;
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            contentView.post(() -> updateHeadsUpSwipeHandle(contentView));
+            return;
+        }
+        Context ctx = contentView.getContext();
+        try {
+            View handle = contentView.findViewWithTag(HEADS_UP_HANDLE_TAG);
+            boolean enabled = ModuleSettings.isSystemUiBubbleEnabled(ctx)
+                    && ModuleSettings.getPopupPresentation(ctx)
+                    == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE;
+            Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
+            Object entry = row != null ? getFieldSystemUi(row, "mEntry") : null;
+            Object sbn = entry != null ? getFieldSystemUi(entry, "mSbn") : null;
+            Notification notification = sbn != null
+                    ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
+            Object headsUpChild = getFieldSystemUi(contentViewObject, "mHeadsUpChild");
+            Object isHeadsUpValue = getFieldSystemUi(contentViewObject, "mIsHeadsUp");
+            Object visibleTypeValue = getFieldSystemUi(contentViewObject, "mVisibleType");
+            boolean isHeadsUp = Boolean.TRUE.equals(isHeadsUpValue)
+                    || (visibleTypeValue instanceof Integer
+                    && ((Integer) visibleTypeValue) == VISIBLE_TYPE_HEADS_UP);
+            boolean validNotification = notification != null
+                    && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
+                    && notification.contentIntent != null;
+
+            if (!enabled || !isHeadsUp || headsUpChild == null || !validNotification) {
+                if (handle != null) handle.setVisibility(View.GONE);
+                return;
+            }
+
+            if (handle == null) {
+                SwipeHandleView newHandle = new SwipeHandleView(ctx);
+                newHandle.setTag(HEADS_UP_HANDLE_TAG);
+                newHandle.setContentDescription(getConfiguredOpenLabel(ctx));
+                newHandle.setOnTouchListener(new View.OnTouchListener() {
+                    private float downY;
+                    private boolean opened;
+
+                    @Override
+                    public boolean onTouch(View v, MotionEvent event) {
+                        switch (event.getActionMasked()) {
+                            case MotionEvent.ACTION_DOWN:
+                                downY = event.getY();
+                                opened = false;
+                                return true;
+                            case MotionEvent.ACTION_MOVE:
+                                if (!opened && event.getY() - downY >= swipeDistance(v.getContext())) {
+                                    opened = true;
+                                    openNotificationFromHeadsUp(v);
+                                }
+                                return true;
+                            case MotionEvent.ACTION_UP:
+                                if (!opened && event.getY() - downY >= swipeDistance(v.getContext())) {
+                                    opened = true;
+                                    openNotificationFromHeadsUp(v);
+                                }
+                                v.performClick();
+                                return true;
+                            case MotionEvent.ACTION_CANCEL:
+                                opened = false;
+                                return true;
+                            default:
+                                return true;
+                        }
+                    }
+                });
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                        dp(ctx, 80), dp(ctx, 30), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                lp.bottomMargin = dp(ctx, 3);
+                contentView.addView(newHandle, lp);
+                handle = newHandle;
+            }
+            handle.setContentDescription(getConfiguredOpenLabel(ctx));
+            handle.setVisibility(View.VISIBLE);
+        } catch (Throwable t) {
+            Log.w(TAG, "update Heads-up handle: " + t.getMessage());
+        }
+    }
+
+    private static float swipeDistance(Context ctx) {
+        return Math.max(ctx.getResources().getDisplayMetrics().density * SWIPE_HANDLE_MIN_DISTANCE_DP,
+                android.view.ViewConfiguration.get(ctx).getScaledTouchSlop() * 2f);
+    }
+
+    private static void openNotificationFromHeadsUp(View handle) {
+        try {
+            ViewGroup contentView = handle.getParent() instanceof ViewGroup
+                    ? (ViewGroup) handle.getParent() : null;
+            if (contentView == null) return;
+            Object row = getFieldSystemUi(contentView, "mContainingNotification");
+            Object entry = row != null ? getFieldSystemUi(row, "mEntry") : null;
+            if (entry == null) return;
+            if (ModuleSettings.getOpenMode(handle.getContext()) == ModuleSettings.OPEN_MODE_FREEFORM) {
+                if (launchNotificationInFreeform(handle.getContext(), entry, "Heads-up swipe")) return;
+                Log.i(TAG, "Heads-up swipe: freeform unavailable, falling back to Bubble");
+            }
+            if (sBubblesManager != null
+                    && expandAppBubbleFromNotification(sBubblesManager, entry, "Heads-up swipe")) {
+                return;
+            }
+            launchNotificationFullscreen(entry, "Heads-up swipe");
+            Log.w(TAG, "Heads-up swipe: BubblesManager is not ready");
+        } catch (Throwable t) {
+            Log.w(TAG, "Heads-up swipe open: " + t.getMessage());
+        }
+    }
+
+    private static boolean launchNotificationInFreeform(Context ctx, Object entry, String reason) {
+        try {
+            Object sbn = getFieldSystemUi(entry, "mSbn");
+            Notification notification = sbn != null
+                    ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
+            if (notification == null || notification.contentIntent == null) return false;
+            if (!isFreeformSupported(ctx)) {
+                Log.w(TAG, reason + ": device freeform support is disabled");
+                showFreeformUnavailableToast(ctx);
+                return false;
+            }
+            // Evolution17's actual Freeform implementation is LMOFreeform. It accepts
+            // the target activity through an exported receiver and starts it from the
+            // system-side Binder service. Sending the notification PendingIntent with
+            // ActivityOptions alone can return without throwing while Android 17 blocks
+            // the background activity launch, leaving the task fullscreen.
+            if (isLmoFreeformServiceAvailable()
+                    && launchNotificationViaLmoFreeform(ctx, sbn, notification, reason)) {
+                return true;
+            }
+            ActivityOptions options = ActivityOptions.makeBasic();
+            if (!configureFreeformOptions(options, ctx, true)) return false;
+            notification.contentIntent.send(options.toBundle());
+            Log.i(TAG, reason + ": launched notification PendingIntent in freeform");
+            return true;
+        } catch (PendingIntent.CanceledException e) {
+            Log.w(TAG, reason + ": notification PendingIntent canceled");
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": freeform notification launch failed: " + t.getMessage());
+            showFreeformUnavailableToast(ctx);
+        }
+        return false;
+    }
+
+    private static boolean launchNotificationViaLmoFreeform(Context ctx, Object sbn,
+            Notification notification, String reason) {
+        try {
+            String packageName = (String) sbn.getClass().getMethod("getPackageName").invoke(sbn);
+            Intent targetIntent = getNotificationTargetIntent(notification, packageName);
+            if (targetIntent == null) return false;
+            ComponentName component = targetIntent.getComponent();
+            if (component == null) component = targetIntent.resolveActivity(ctx.getPackageManager());
+            if (component == null) {
+                Log.w(TAG, reason + ": LMO Freeform target activity not resolved");
+                return false;
+            }
+
+            int userId = 0;
+            try { userId = (int) sbn.getClass().getMethod("getUserId").invoke(sbn); }
+            catch (Throwable ignored) {}
+            if (userId < 0) userId = 0;
+
+            Intent startFreeform = new Intent("com.libremobileos.freeform.START_FREEFORM")
+                    .setComponent(new ComponentName(
+                            "com.libremobileos.freeform",
+                            "com.libremobileos.freeform.receiver.StartFreeformReceiver"))
+                    .putExtra("packageName", component.getPackageName())
+                    .putExtra("activityName", component.getClassName())
+                    .putExtra("userId", userId)
+                    .putExtra("taskId", -1);
+            ctx.sendBroadcast(startFreeform);
+            Log.i(TAG, reason + ": requested LMO Freeform for "
+                    + component.flattenToShortString());
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": LMO Freeform request failed: " + t.getMessage());
+            return false;
+        }
+    }
+
+    private static boolean isFreeformSupported(Context ctx) {
+        try {
+            if (ctx.getPackageManager().hasSystemFeature(PackageManager.FEATURE_FREEFORM_WINDOW_MANAGEMENT)) {
+                Log.i(TAG, "Freeform supported by PackageManager feature");
+                return true;
+            }
+        } catch (Throwable ignored) {}
+        try {
+            if (android.provider.Settings.Global.getInt(
+                    ctx.getContentResolver(), "enable_freeform_support", 0) != 0) {
+                Log.i(TAG, "Freeform supported by enable_freeform_support");
+                return true;
+            }
+        } catch (Throwable ignored) {
+            // Evolution's current Launcher3 path also supports the newer DesktopMode /
+            // Window Extensions implementation, which may not publish the legacy
+            // FEATURE_FREEFORM_WINDOW_MANAGEMENT or enable_freeform_support setting.
+        }
+        if (isEvolutionDesktopModeAvailable(ctx)) return true;
+        if (isLmoFreeformServiceAvailable()) return true;
+
+        // Some Evolution-derived builds enable the WMShell extension without exposing
+        // the legacy feature flag. This is only a positive hint; the actual launch is
+        // still guarded by the try/catch below and will fall back if WindowManager rejects it.
+        if (getSystemPropertyBoolean("persist.wm.extensions.enabled", false)) {
+            Log.i(TAG, "Freeform supported by Window Extensions property");
+            return true;
+        }
+        Log.w(TAG, "No Freeform/DesktopMode capability detected");
+        return false;
+    }
+
+    private static boolean isLmoFreeformServiceAvailable() {
+        try {
+            Class<?> serviceManager = Class.forName("android.os.ServiceManager");
+            Method getService = serviceManager.getDeclaredMethod("getService", String.class);
+            getService.setAccessible(true);
+            Object binder = getService.invoke(null, "lmo_freeform");
+            if (binder != null) {
+                Log.i(TAG, "Freeform supported by lmo_freeform Binder service");
+                return true;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "LMO Freeform service check failed: " + t.getMessage());
+        }
+        return false;
+    }
+
+    private static boolean isEvolutionDesktopModeAvailable(Context ctx) {
+        String[] statusClasses = {
+                "com.android.wm.shell.shared.desktopmode.DesktopModeStatus",
+                "com.android.wm.shell.desktopmode.DesktopModeStatus"
+        };
+        for (String className : statusClasses) {
+            try {
+                ClassLoader loader = ctx.getClassLoader();
+                Class<?> status = Class.forName(className, false, loader);
+                Method method = status.getDeclaredMethod("canEnterDesktopMode", Context.class);
+                method.setAccessible(true);
+                Object result = method.invoke(null, ctx);
+                if (Boolean.TRUE.equals(result)) {
+                    Log.i(TAG, "Freeform supported by " + className + ".canEnterDesktopMode");
+                    return true;
+                }
+                Log.i(TAG, className + ".canEnterDesktopMode=false");
+            } catch (ClassNotFoundException ignored) {
+                // The class is optional across Android/Evolution versions.
+            } catch (Throwable t) {
+                Log.w(TAG, "DesktopMode capability check failed for " + className + ": "
+                        + t.getMessage());
+            }
+        }
+        return false;
+    }
+
+    private static boolean getSystemPropertyBoolean(String key, boolean defaultValue) {
+        try {
+            Class<?> systemProperties = Class.forName("android.os.SystemProperties");
+            Method getBoolean = systemProperties.getDeclaredMethod(
+                    "getBoolean", String.class, boolean.class);
+            getBoolean.setAccessible(true);
+            Object result = getBoolean.invoke(null, key, defaultValue);
+            return Boolean.TRUE.equals(result);
+        } catch (Throwable ignored) {
+            return defaultValue;
+        }
+    }
+
+    private static boolean configureFreeformOptions(ActivityOptions options, Context ctx,
+            boolean setBounds) {
+        try {
+            Method windowingMode = findMethodSystemUi(options.getClass(),
+                    "setLaunchWindowingMode", int.class);
+            if (windowingMode == null) return false;
+            windowingMode.invoke(options, WINDOWING_MODE_FREEFORM);
+            if (setBounds) {
+                Method launchBounds = findMethodSystemUi(options.getClass(),
+                        "setLaunchBounds", Rect.class);
+                if (launchBounds != null) launchBounds.invoke(options, defaultFreeformBounds(ctx));
+            }
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "configure freeform options: " + t.getMessage());
+            return false;
+        }
+    }
+
+    private static Rect defaultFreeformBounds(Context ctx) {
+        android.util.DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+        int width = dm.widthPixels;
+        int height = dm.heightPixels;
+        int left = Math.max(0, width / 12);
+        int top = Math.max(0, height / 5);
+        int right = Math.min(width, width - left);
+        int bottom = Math.min(height, top + Math.max(dp(ctx, 280), (int) (height * 0.58f)));
+        return new Rect(left, top, right, bottom);
+    }
+
+    private static void showFreeformUnavailableToast(Context ctx) {
+        showToast(ctx, getFreeformUnavailableLabel(ctx));
+    }
+
+    private static boolean launchNotificationFullscreen(Object entry, String reason) {
+        try {
+            Object sbn = getFieldSystemUi(entry, "mSbn");
+            Notification notification = sbn != null
+                    ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
+            if (notification == null || notification.contentIntent == null) return false;
+            notification.contentIntent.send();
+            Log.i(TAG, reason + ": launched notification PendingIntent fullscreen");
+            return true;
+        } catch (PendingIntent.CanceledException e) {
+            Log.w(TAG, reason + ": fullscreen PendingIntent canceled");
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": fullscreen launch failed: " + t.getMessage());
+        }
+        return false;
+    }
+
+    private static int dp(Context ctx, long value) {
+        return (int) (value * ctx.getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    private static String getConfiguredOpenLabel(Context ctx) {
+        return ModuleSettings.getOpenMode(ctx) == ModuleSettings.OPEN_MODE_FREEFORM
+                ? getFreeformLabel(ctx) : getBubbleButtonLabel(ctx);
+    }
+
+    private static String getFreeformLabel(Context hostContext) {
+        try {
+            Context moduleContext = hostContext.createPackageContext(
+                    "com.floatwindow.morebubblebutton", Context.CONTEXT_IGNORE_SECURITY);
+            return moduleContext.getString(R.string.freeform_label);
+        } catch (Throwable ignored) {
+            return "Freeform";
+        }
+    }
+
+    private static String getFreeformUnavailableLabel(Context hostContext) {
+        try {
+            Context moduleContext = hostContext.createPackageContext(
+                    "com.floatwindow.morebubblebutton", Context.CONTEXT_IGNORE_SECURITY);
+            return moduleContext.getString(R.string.freeform_unavailable);
+        } catch (Throwable ignored) {
+            return "Freeform is unavailable; using Bubble instead";
+        }
+    }
+
+    private static final class SwipeHandleView extends View {
+        private final Paint barPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint arrowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        SwipeHandleView(Context context) {
+            super(context);
+            setWillNotDraw(false);
+            setClickable(true);
+            setFocusable(false);
+            barPaint.setColor(0xB85F6368);
+            arrowPaint.setColor(0xFFF5F5F5);
+            arrowPaint.setStyle(Paint.Style.STROKE);
+            arrowPaint.setStrokeWidth(dp(context, 1));
+            arrowPaint.setStrokeCap(Paint.Cap.ROUND);
+            setMinimumHeight(dp(context, 30));
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float density = getResources().getDisplayMetrics().density;
+            float barWidth = 56f * density;
+            float barHeight = 7f * density;
+            float left = (getWidth() - barWidth) / 2f;
+            float top = 5f * density;
+            canvas.drawRoundRect(left, top, left + barWidth, top + barHeight,
+                    barHeight / 2f, barHeight / 2f, barPaint);
+
+            // A small downward chevron communicates the same pull-down gesture as the reference.
+            float cx = getWidth() / 2f;
+            float cy = 17f * density;
+            canvas.drawLine(cx - 4f * density, cy, cx, cy + 4f * density, arrowPaint);
+            canvas.drawLine(cx, cy + 4f * density, cx + 4f * density, cy, arrowPaint);
+        }
+    }
+
     private static boolean expandAppBubbleFromNotification(Object bubblesManager, Object entry, String reason) {
         try {
             Object sbn = getFieldSystemUi(entry, "mSbn");
@@ -260,13 +710,21 @@ public class MoreBubbleHookModule extends XposedModule {
             if (controller == null || pkg == null) return false;
             Notification notif = (Notification) invokeSystemUi(sbn, "getNotification");
             Context ctx = (Context) getFieldSystemUi(controller, "mContext");
+            if (ctx != null && ModuleSettings.getOpenMode(ctx) == ModuleSettings.OPEN_MODE_FREEFORM) {
+                boolean launched = launchNotificationInFreeform(ctx, entry, reason);
+                if (launched) {
+                    runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
+                    return true;
+                }
+                Log.i(TAG, reason + ": freeform unavailable, falling back to Bubble");
+            }
             Intent targetIntent = getNotificationTargetIntent(notif, pkg);
             Intent launchIntent = ctx != null ? ctx.getPackageManager().getLaunchIntentForPackage(pkg) : null;
             if (targetIntent == null) targetIntent = launchIntent;
             if (targetIntent == null || launchIntent == null) {
                 Log.w(TAG, reason + ": skip app bubble, no target intent for " + pkg);
                 collapseShadeFromManager(bubblesManager);
-                return true;
+                return launchNotificationFullscreen(entry, reason);
             }
             if (targetIntent.getPackage() == null) {
                 targetIntent.setPackage(pkg);
@@ -307,9 +765,11 @@ public class MoreBubbleHookModule extends XposedModule {
                         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
                     } else {
                         Log.w(TAG, reason + ": app bubble expand method not found");
+                        launchNotificationFullscreen(entry, reason);
                     }
                 } catch (Throwable t) {
                     Log.w(TAG, reason + ": app bubble expand failed: " + t.getMessage());
+                    launchNotificationFullscreen(entry, reason);
                 }
             };
             Object executor = getFieldSystemUi(controller, "mMainExecutor");
@@ -991,7 +1451,7 @@ public class MoreBubbleHookModule extends XposedModule {
                     int userId = getField(key, "userId") != null ? (int) getField(key, "userId") : 0;
                     if (intent != null) {
                         findMethod(menuView.getClass(), "close", boolean.class).invoke(menuView, true);
-                        bubbleCurrentTask(ctx, intent, task, userId);
+                        openTaskFromRecents(ctx, intent, task, userId);
                         new android.os.Handler(Looper.getMainLooper()).postDelayed(() -> dismissOverview(ctx), 200);
                     }
                 } catch (Throwable t) { Log.e(TAG, "menu click: " + t.getMessage()); }
@@ -1021,9 +1481,76 @@ public class MoreBubbleHookModule extends XposedModule {
             int userId = getField(key, "userId") != null ? (int) getField(key, "userId") : 0;
             if (intent == null) return;
 
-            bubbleCurrentTask(ctx, intent, task, userId);
+            openTaskFromRecents(ctx, intent, task, userId);
             new android.os.Handler(Looper.getMainLooper()).postDelayed(() -> dismissOverview(ctx), 200);
         } catch (Throwable t) { Log.e(TAG, "onBubbleButtonClick: " + t.getMessage()); }
+    }
+
+    private boolean openTaskFromRecents(Context ctx, Intent intent, Object task, int userId) {
+        if (ModuleSettings.getOpenMode(ctx) == ModuleSettings.OPEN_MODE_FREEFORM) {
+            if (isFreeformSupported(ctx) && startTaskInFreeform(task, ctx)) {
+                Log.i(TAG, "Opened recents task in freeform");
+                return true;
+            }
+            Log.i(TAG, "Recents freeform unavailable, falling back to Bubble");
+        }
+        if (bubbleCurrentTask(ctx, intent, task, userId)) return true;
+        Log.w(TAG, "Bubble launch failed, falling back to fullscreen activity");
+        return startTaskFullscreen(ctx, intent, userId);
+    }
+
+    /** Evolution/AOSP's native path: ActivityManagerWrapper.startActivityFromRecents(TaskKey, options). */
+    private boolean startTaskInFreeform(Object task, Context ctx) {
+        try {
+            Object key = getField(task, "key");
+            if (key == null) key = invoke(task, "getKey");
+            if (key == null || mLauncherClassLoader == null) return false;
+
+            Class<?> wrapperCls = mLauncherClassLoader.loadClass(
+                    "com.android.systemui.shared.system.ActivityManagerWrapper");
+            Method getInstance = wrapperCls.getMethod("getInstance");
+            Object wrapper = getInstance.invoke(null);
+            ActivityOptions options = ActivityOptions.makeBasic();
+            if (!configureFreeformOptions(options, ctx, true)) return false;
+
+            for (Method method : allMethods(wrapper.getClass())) {
+                if (!method.getName().equals("startActivityFromRecents")
+                        || method.getParameterCount() != 2
+                        || !ActivityOptions.class.isAssignableFrom(method.getParameterTypes()[1])
+                        || !method.getParameterTypes()[0].isAssignableFrom(key.getClass())) {
+                    continue;
+                }
+                method.setAccessible(true);
+                Object result = method.invoke(wrapper, key, options);
+                boolean success = !(result instanceof Boolean) || (Boolean) result;
+                Log.i(TAG, "ActivityManagerWrapper.startActivityFromRecents result=" + success);
+                return success;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "startTaskInFreeform: " + t.getMessage());
+        }
+        return false;
+    }
+
+    private static List<Method> allMethods(Class<?> type) {
+        java.util.ArrayList<Method> methods = new java.util.ArrayList<>();
+        for (Class<?> c = type; c != null; c = c.getSuperclass()) {
+            for (Method method : c.getDeclaredMethods()) methods.add(method);
+        }
+        return methods;
+    }
+
+    private static boolean startTaskFullscreen(Context ctx, Intent intent, int userId) {
+        try {
+            Intent fallback = new Intent(intent);
+            fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+            ctx.startActivity(fallback);
+            Log.i(TAG, "Started recents task fullscreen");
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "startTaskFullscreen: " + t.getMessage());
+            return false;
+        }
     }
 
     private boolean bubbleCurrentTask(Context ctx, Intent taskIntent, Object task, int userId) {

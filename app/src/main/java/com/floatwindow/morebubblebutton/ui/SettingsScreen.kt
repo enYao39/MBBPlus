@@ -80,6 +80,8 @@ fun SettingsScreen() {
     var menuEnabled by remember { mutableStateOf(ModuleSettings.isMenuEnabled(ctx)) }
     var actionBarEnabled by remember { mutableStateOf(ModuleSettings.isActionBarEnabled(ctx)) }
     var systemUiBubbleEnabled by remember { mutableStateOf(ModuleSettings.isSystemUiBubbleEnabled(ctx)) }
+    var openMode by remember { mutableIntStateOf(ModuleSettings.getOpenMode(ctx)) }
+    var popupPresentation by remember { mutableIntStateOf(ModuleSettings.getPopupPresentation(ctx)) }
     var positionMode by remember { mutableIntStateOf(ModuleSettings.getPositionMode(ctx)) }
     var sliderX by remember { mutableFloatStateOf(ModuleSettings.getPosX(ctx).toFloat()) }
     var sliderY by remember { mutableFloatStateOf(ModuleSettings.getPosY(ctx).toFloat()) }
@@ -136,6 +138,34 @@ fun SettingsScreen() {
                     onCheckedChange = {
                         systemUiBubbleEnabled = it
                         ModuleSettings.setSystemUiBubbleEnabled(ctx, it)
+                    }
+                )
+                PreferenceDivider()
+                ChoicePreferenceRow(
+                    title = stringResource(R.string.open_mode_title),
+                    summary = stringResource(R.string.open_mode_summary),
+                    selected = openMode,
+                    labels = listOf(
+                        stringResource(R.string.open_mode_bubble),
+                        stringResource(R.string.open_mode_freeform)
+                    ),
+                    onSelected = {
+                        openMode = it
+                        ModuleSettings.setOpenMode(ctx, it)
+                    }
+                )
+                PreferenceDivider()
+                ChoicePreferenceRow(
+                    title = stringResource(R.string.popup_presentation_title),
+                    summary = stringResource(R.string.popup_presentation_summary),
+                    selected = popupPresentation,
+                    labels = listOf(
+                        stringResource(R.string.popup_presentation_button),
+                        stringResource(R.string.popup_presentation_handle)
+                    ),
+                    onSelected = {
+                        popupPresentation = it
+                        ModuleSettings.setPopupPresentation(ctx, it)
                     }
                 )
             }
@@ -496,6 +526,43 @@ private fun PreferenceDivider() {
         modifier = Modifier.padding(start = 76.dp),
         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
     )
+}
+
+@Composable
+private fun ChoicePreferenceRow(
+    title: String,
+    summary: String,
+    selected: Int,
+    labels: List<String>,
+    onSelected: (Int) -> Unit
+) {
+    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
+        Text(title, style = MaterialTheme.typography.bodyLarge)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = summary,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            labels.forEachIndexed { index, label ->
+                SegmentedButton(
+                    selected = selected == index,
+                    onClick = { onSelected(index) },
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = labels.size),
+                    modifier = Modifier.weight(1f),
+                    label = {
+                        Text(
+                            text = label,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                )
+            }
+        }
+    }
 }
 
 @Composable

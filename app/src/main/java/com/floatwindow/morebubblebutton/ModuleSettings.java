@@ -16,6 +16,13 @@ public class ModuleSettings {
     public static final String KEY_POS_X = "pos_x"; // 0-100, 50=居中
     public static final String KEY_POS_Y = "pos_y"; // 0-100, 50=居中
     public static final String KEY_SYSTEMUI_BUBBLE_ENABLED = "systemui_bubble_enabled";
+    public static final String KEY_OPEN_MODE = "open_mode"; // 0=Bubble 1=Freeform
+    public static final String KEY_POPUP_PRESENTATION = "popup_presentation"; // 0=按钮 1=下滑横条
+
+    public static final int OPEN_MODE_BUBBLE = 0;
+    public static final int OPEN_MODE_FREEFORM = 1;
+    public static final int POPUP_PRESENTATION_BUBBLE_BUTTON = 0;
+    public static final int POPUP_PRESENTATION_SWIPE_HANDLE = 1;
     private static final Uri SETTINGS_URI = SettingsProvider.CONTENT_URI;
     private static final long REMOTE_CACHE_MS = 250L;
     private static volatile long sRemoteCacheAt;
@@ -117,6 +124,28 @@ public class ModuleSettings {
     }
     public static void setSystemUiBubbleEnabled(Context ctx, boolean v) {
         getPrefs(ctx).edit().putBoolean(KEY_SYSTEMUI_BUBBLE_ENABLED, v).apply();
+    }
+
+    /** 打开方式：0=Bubble，1=系统 Freeform 窗口。 */
+    public static int getOpenMode(Context ctx) {
+        int value = getInt(ctx, KEY_OPEN_MODE, OPEN_MODE_BUBBLE);
+        return value == OPEN_MODE_FREEFORM ? OPEN_MODE_FREEFORM : OPEN_MODE_BUBBLE;
+    }
+    public static void setOpenMode(Context ctx, int value) {
+        getPrefs(ctx).edit().putInt(KEY_OPEN_MODE,
+                value == OPEN_MODE_FREEFORM ? OPEN_MODE_FREEFORM : OPEN_MODE_BUBBLE).apply();
+    }
+
+    /** Heads-up 中显示原生 Bubble 按钮，或显示可下滑的横条。 */
+    public static int getPopupPresentation(Context ctx) {
+        int value = getInt(ctx, KEY_POPUP_PRESENTATION, POPUP_PRESENTATION_BUBBLE_BUTTON);
+        return value == POPUP_PRESENTATION_SWIPE_HANDLE
+                ? POPUP_PRESENTATION_SWIPE_HANDLE : POPUP_PRESENTATION_BUBBLE_BUTTON;
+    }
+    public static void setPopupPresentation(Context ctx, int value) {
+        getPrefs(ctx).edit().putInt(KEY_POPUP_PRESENTATION,
+                value == POPUP_PRESENTATION_SWIPE_HANDLE
+                        ? POPUP_PRESENTATION_SWIPE_HANDLE : POPUP_PRESENTATION_BUBBLE_BUTTON).apply();
     }
 
     private static int clampPercent(int v) {

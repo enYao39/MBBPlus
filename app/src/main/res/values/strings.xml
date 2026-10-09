@@ -3,7 +3,7 @@
     <string name="app_name">MoreBubbleButton</string>
     <string name="bubble_button_label">Bubble</string>
     <string name="module_description">Add a Message Bubble button to the Pixel Launcher recents view and notification shade.</string>
-    <string name="settings_subtitle">Turn any supported app into a message bubble.</string>
+    <string name="settings_subtitle">Turn any supported app into a Bubble or freeform window.</string>
     <string name="settings_language_auto">Language follows the system automatically</string>
     <string name="section_recents">Recents</string>
     <string name="section_notifications">Notifications</string>
@@ -11,11 +11,19 @@
     <string name="section_actions">Actions</string>
     <string name="section_about">About</string>
     <string name="feature_menu_title">Task card menu</string>
-    <string name="feature_menu_summary">Show Message Bubble in the menu opened from a task card icon.</string>
+    <string name="feature_menu_summary">Show Bubble in the menu opened from a task card icon.</string>
     <string name="feature_action_bar_title">Bottom action bar</string>
-    <string name="feature_action_bar_summary">Show Message Bubble in the bottom bar of the recents screen.</string>
+    <string name="feature_action_bar_summary">Show Bubble in the bottom bar of the recents screen.</string>
     <string name="feature_system_ui_title">Notification bubble button</string>
     <string name="feature_system_ui_summary">Show a bubble button for regular notifications that can open an app.</string>
+    <string name="open_mode_title">Open with</string>
+    <string name="open_mode_bubble">Bubble</string>
+    <string name="open_mode_freeform">Freeform</string>
+    <string name="open_mode_summary">Choose how a task or notification is opened. Freeform falls back to Bubble, then fullscreen.</string>
+    <string name="popup_presentation_title">Heads-up affordance</string>
+    <string name="popup_presentation_button">Bubble button</string>
+    <string name="popup_presentation_handle">Swipe handle</string>
+    <string name="popup_presentation_summary">Show one affordance in Heads-up only. Swipe the handle downward to open.</string>
     <string name="position_mode_title">Display row</string>
     <string name="position_mode_follow">Follow original</string>
     <string name="position_mode_second">Second row</string>
@@ -44,4 +52,6 @@
     <string name="compatibility_value">Android 16+ · LSPosed Modern API</string>
     <string name="about_language">English and Simplified Chinese are detected from the system language.</string>
     <string name="app_icon_description">MoreBubbleButton icon</string>
+    <string name="freeform_label">Freeform</string>
+    <string name="freeform_unavailable">Freeform is unavailable; using Bubble instead.</string>
 </resources>
