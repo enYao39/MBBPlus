@@ -472,9 +472,13 @@ public class MoreBubbleHookModule extends XposedModule {
                     "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow");
             hookRowMethods(rowClass, "setHeadsUp", false);
             hookRowMethods(rowClass, "setActualHeight", false);
+            hookRowMethods(rowClass, "onMeasure", false);
             hookRowMethods(rowClass, "onLayout", false);
             hookRowMethods(rowClass, "onAttachedToWindow", false);
             hookRowMethods(rowClass, "onDetachedFromWindow", false);
+            hookRowMethods(rowClass, "setClipToActualHeight", false);
+            hookRowMethods(rowClass, "setClipBottomAmount", false);
+            hookRowMethods(rowClass, "setBottomOverlap", false);
             hookRowMethods(rowClass, "setHeadsUpAnimatingAway", false);
             hookRowMethods(rowClass, "onNotificationUpdated", true);
             hookRowMethods(rowClass, "setBubbleClickListener", true);
@@ -579,6 +583,7 @@ public class MoreBubbleHookModule extends XposedModule {
         rowView.postDelayed(sync, 48L);
         rowView.postDelayed(sync, 160L);
         rowView.postDelayed(sync, 320L);
+        rowView.postDelayed(sync, 640L);
     }
 
     private static void syncHeadsUpSwipeHandle(Object row) {
@@ -694,9 +699,40 @@ public class MoreBubbleHookModule extends XposedModule {
         int actualHeight = 0;
         Object value = invokeSystemUi(host, "getActualHeight");
         if (value instanceof Number) actualHeight = ((Number) value).intValue();
-        if (actualHeight <= 0) actualHeight = host.getHeight();
-        if (actualHeight <= 0) actualHeight = host.getMeasuredHeight();
-        int topMargin = Math.max(0, actualHeight - handleHeight - bottomMargin);
+        int layoutHeight = host.getHeight();
+        int measuredHeight = host.getMeasuredHeight();
+
+        // getActualHeight() is an animation value on ExpandableView. During the first
+        // unexpanded Heads-up layout it can still describe the intrinsic/expanded row height,
+        // while the View itself is already laid out at the smaller contracted height. Using it
+        // directly places the handle below the row's clip bounds. Always clamp the placement to
+        // the actual laid-out bounds, and then to any explicit clip bounds applied by SystemUI.
+        int visibleBottom = layoutHeight > 0 ? layoutHeight : measuredHeight;
+        if (visibleBottom <= 0) visibleBottom = actualHeight;
+        if (actualHeight > 0 && visibleBottom > 0) {
+            visibleBottom = Math.min(visibleBottom, actualHeight);
+        }
+        Rect clipBounds = host.getClipBounds();
+        int visibleTop = 0;
+        if (clipBounds != null) {
+            visibleTop = Math.max(0, clipBounds.top);
+            if (clipBounds.bottom > 0) {
+                visibleBottom = visibleBottom > 0
+                        ? Math.min(visibleBottom, clipBounds.bottom)
+                        : clipBounds.bottom;
+            }
+        }
+        if (visibleBottom <= 0) {
+            handle.setVisibility(View.INVISIBLE);
+            Log.d(TAG, "Heads-up handle waiting for row layout: row="
+                    + host.getClass().getSimpleName()
+                    + " size=" + layoutHeight + "x" + measuredHeight
+                    + " actual=" + actualHeight
+                    + " clip=" + clipBounds);
+            return;
+        }
+        int topMargin = Math.max(visibleTop,
+                visibleBottom - handleHeight - bottomMargin);
         int width = dp(ctx, ModuleSettings.getSwipeHandleLength(ctx) + 24);
         if (host instanceof FrameLayout) {
             FrameLayout.LayoutParams lp = handle.getLayoutParams() instanceof FrameLayout.LayoutParams
@@ -724,6 +760,22 @@ public class MoreBubbleHookModule extends XposedModule {
             if (changed) handle.setLayoutParams(lp);
             handle.setX(Math.max(0, (host.getWidth() - width) / 2f));
         }
+
+        // Notification rows can skip measuring a child that was injected after their normal
+        // content children. Give our fixed-size view an explicit measure pass as a safeguard.
+        int exactWidth = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY);
+        int exactHeight = View.MeasureSpec.makeMeasureSpec(handleHeight, View.MeasureSpec.EXACTLY);
+        if (handle.getMeasuredWidth() != width || handle.getMeasuredHeight() != handleHeight) {
+            handle.measure(exactWidth, exactHeight);
+        }
+        Log.d(TAG, "Heads-up handle geometry: row=" + host.getClass().getSimpleName()
+                + " size=" + layoutHeight + "x" + measuredHeight
+                + " actual=" + actualHeight
+                + " visibleBottom=" + visibleBottom
+                + " clip=" + clipBounds
+                + " top=" + topMargin
+                + " handle=" + handle.getMeasuredWidth() + "x" + handle.getMeasuredHeight()
+                + " visibility=" + handle.getVisibility());
     }
 
     private static void addHandleToRow(ViewGroup host, View handle,
