@@ -628,7 +628,14 @@ public class MoreBubbleHookModule extends XposedModule {
             // the caller can still use the normal Bubble/fullscreen fallback.
             if (getRunningTasks(ctx) == null) return false;
 
-            notification.contentIntent.send();
+            // Android 17 defaults PendingIntent launches from SystemUI to
+            // MODE_SYSTEM_DEFINED. The notification creator is a background
+            // app, so ActivityTaskManager rejects the launch before a task can
+            // be created. SystemUI's own remote-action code opts into mode 1;
+            // mirror that behavior here so the task-move path has a real task.
+            ActivityOptions pendingIntentOptions = ActivityOptions.makeBasic();
+            setPendingIntentBackgroundStartAllowed(pendingIntentOptions);
+            notification.contentIntent.send(pendingIntentOptions.toBundle());
             long launchTime = SystemClock.uptimeMillis();
             ComponentName finalTarget = target;
             Context appContext = ctx.getApplicationContext();
@@ -644,7 +651,8 @@ public class MoreBubbleHookModule extends XposedModule {
                         userId, taskId, reason);
             }, "MoreBubble-LMO-task-move");
             mover.start();
-            Log.i(TAG, reason + ": launched notification PendingIntent; moving its task to LMO Freeform");
+            Log.i(TAG, reason + ": launched notification PendingIntent with BAL allowance; "
+                    + "moving its task to LMO Freeform");
             return true;
         } catch (PendingIntent.CanceledException e) {
             Log.w(TAG, reason + ": notification PendingIntent canceled before LMO task move");
@@ -652,6 +660,21 @@ public class MoreBubbleHookModule extends XposedModule {
             Log.w(TAG, reason + ": LMO task move preparation failed: " + t.getMessage());
         }
         return false;
+    }
+
+    private static void setPendingIntentBackgroundStartAllowed(ActivityOptions options) {
+        try {
+            Method setter = ActivityOptions.class.getMethod(
+                    "setPendingIntentBackgroundActivityStartMode", int.class);
+            int mode = 1; // MODE_BACKGROUND_ACTIVITY_START_ALLOWED on API 34+.
+            try {
+                mode = ActivityOptions.class.getField(
+                        "MODE_BACKGROUND_ACTIVITY_START_ALLOWED").getInt(null);
+            } catch (Throwable ignored) {}
+            setter.invoke(options, mode);
+        } catch (Throwable t) {
+            Log.w(TAG, "PendingIntent BAL allowance unavailable: " + t.getMessage());
+        }
     }
 
     private static int getNotificationUserId(Object sbn) {
