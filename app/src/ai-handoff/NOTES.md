@@ -39,8 +39,8 @@ Evolution 衍生系统可能不暴露传统的 `FEATURE_FREEFORM_WINDOW_MANAGEME
 - AIDL 描述符：`com.libremobileos.freeform.ILMOFreeformUIService`
 - `startAppInFreeform` 是第一个 Binder 方法，事务号为 `1`。
 - 传递通知原始 `PendingIntent` 时，`userId` 必须使用 LMO 的特殊值 `-100`，`taskId` 使用 `-1`，这样服务才会走 PendingIntent 分支并保留通知 deep-link/extras。
-- 组件广播 Receiver 只作为兼容回退；它不能替代 PendingIntent 路径，因为它会丢失通知上下文。
-- 该 Binder 接口要求 system UID。代码运行在 SystemUI Hook 中时才应尝试调用，普通模块 Activity 进程不能直接调用。
+- 该 Binder 接口要求 system UID；SystemUI 是独立的应用 UID，不能直接调用。SystemUI 路径应先发送原始 PendingIntent 创建真实任务，再通过导出的 Receiver 传递真实 `taskId`，让 LMO 将任务移动到 Freeform 显示。
+- 组件 Receiver 的 `taskId=-1` 路径只作为最后兼容回退；它按组件重新启动 Activity，可能丢失通知上下文，不应作为首选。
 
 公开参考仓库：
 [ProjectInfinity-X/packages_apps_LMOFreeform](https://github.com/ProjectInfinity-X/packages_apps_LMOFreeform)

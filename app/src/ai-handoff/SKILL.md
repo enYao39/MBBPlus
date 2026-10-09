@@ -19,9 +19,10 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 ## Freeform 处理规则
 
 - 先检查传统 Freeform feature、全局设置、Evolution DesktopMode 和 `lmo_freeform` Binder 服务。
-- 在 SystemUI 进程中优先使用 LMO Binder 的 PendingIntent 路径，以保留通知 deep-link 和 extras。
-- LMO PendingIntent 路径的参数顺序必须与 AIDL 一致：包名、占位 Activity、`userId=-100`、`taskId=-1`、PendingIntent、宽、高、densityDpi。
-- Binder 失败后才尝试兼容 Receiver/ActivityOptions；所有路径都必须最终支持 Bubble 和全屏回退。
+- LMO Binder 的 PendingIntent 路径要求 system UID，普通 SystemUI UID 不能直接调用；不要仅因 Binder 服务存在就从 SystemUI 手动 transact。
+- SystemUI 应先发送原始通知 PendingIntent，再查询新任务并通过 LMO Receiver 传递真实 `taskId` 将任务移动到 Freeform；只有任务查询不可用时才使用组件 Receiver/ActivityOptions 回退。
+- 如果代码运行在真正的 system UID 进程，LMO PendingIntent 路径的参数顺序必须与 AIDL 一致：包名、占位 Activity、`userId=-100`、`taskId=-1`、PendingIntent、宽、高、densityDpi。
+- 所有路径都必须最终支持 Bubble 和全屏回退。
 - 不要把“调用返回成功”当成“窗口可用”；要继续检查窗口是否创建、目标任务是否被移除，以及是否出现后台启动拦截。
 
 ## Heads-up 和设置界面规则

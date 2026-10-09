@@ -466,8 +466,23 @@ public class MoreBubbleHookModule extends XposedModule {
         // The LMO service has a dedicated PendingIntent path. Unlike the exported
         // component-only receiver, it preserves the notification's deep-link,
         // extras and creator token (for example, a WeChat conversation target).
-        if (launchNotificationViaLmoBinder(ctx, sbn, notification, reason)) return true;
+        // It is restricted to SYSTEM_UID by LMOFreeformUIService, so only try it
+        // when this hook is actually running in a system process. SystemUI itself
+        // is a separate application UID and must use the task-move path below.
+        if (android.os.Process.myUid() == android.os.Process.SYSTEM_UID
+                && launchNotificationViaLmoBinder(ctx, sbn, notification, reason)) return true;
 
+        // SystemUI can send the notification PendingIntent, but cannot call the
+        // LMO Binder service directly. Let the PendingIntent create its real task
+        // first, then ask the exported system-UID receiver to move that task into
+        // an LMO Freeform display. This keeps the original notification extras.
+        if (launchNotificationByTaskMove(ctx, sbn, notification, reason)) return true;
+
+        return launchNotificationViaLmoComponent(ctx, sbn, notification, reason);
+    }
+
+    private static boolean launchNotificationViaLmoComponent(Context ctx, Object sbn,
+            Notification notification, String reason) {
         try {
             String packageName = (String) sbn.getClass().getMethod("getPackageName").invoke(sbn);
             Intent targetIntent = getNotificationTargetIntent(notification, packageName);
@@ -492,13 +507,171 @@ public class MoreBubbleHookModule extends XposedModule {
                     .putExtra("activityName", component.getClassName())
                     .putExtra("userId", userId)
                     .putExtra("taskId", -1);
-            ctx.sendBroadcast(startFreeform);
+            UserHandle user = getUserHandle(userId);
+            if (user == null) return false;
+            ctx.sendBroadcastAsUser(startFreeform, user);
             Log.i(TAG, reason + ": requested LMO Freeform for "
                     + component.flattenToShortString());
             return true;
         } catch (Throwable t) {
             Log.w(TAG, reason + ": LMO Freeform request failed: " + t.getMessage());
             return false;
+        }
+    }
+
+    private static boolean launchNotificationByTaskMove(Context ctx, Object sbn,
+            Notification notification, String reason) {
+        if (notification == null || notification.contentIntent == null) return false;
+
+        try {
+            String packageName = (String) sbn.getClass().getMethod("getPackageName").invoke(sbn);
+            if (packageName == null) return false;
+            Intent targetIntent = getNotificationTargetIntent(notification, packageName);
+            ComponentName target = targetIntent != null ? targetIntent.getComponent() : null;
+            if (target == null && targetIntent != null) {
+                target = targetIntent.resolveActivity(ctx.getPackageManager());
+            }
+            if (target == null) {
+                Intent launchIntent = ctx.getPackageManager().getLaunchIntentForPackage(packageName);
+                if (launchIntent != null) target = launchIntent.resolveActivity(ctx.getPackageManager());
+            }
+
+            int userId = getNotificationUserId(sbn);
+            // Check the task-query capability before consuming the notification
+            // PendingIntent. If this device hides running tasks from SystemUI,
+            // the caller can still use the normal Bubble/fullscreen fallback.
+            if (getRunningTasks(ctx) == null) return false;
+
+            notification.contentIntent.send();
+            long launchTime = SystemClock.uptimeMillis();
+            ComponentName finalTarget = target;
+            Context appContext = ctx.getApplicationContext();
+            Thread mover = new Thread(() -> {
+                int taskId = waitForNotificationTask(appContext, packageName, finalTarget,
+                        launchTime);
+                if (taskId < 0) {
+                    Log.w(TAG, reason + ": notification task was not found for LMO Freeform");
+                    return;
+                }
+                requestLmoFreeformForTask(appContext, packageName,
+                        finalTarget != null ? finalTarget.getClassName() : "unknown",
+                        userId, taskId, reason);
+            }, "MoreBubble-LMO-task-move");
+            mover.start();
+            Log.i(TAG, reason + ": launched notification PendingIntent; moving its task to LMO Freeform");
+            return true;
+        } catch (PendingIntent.CanceledException e) {
+            Log.w(TAG, reason + ": notification PendingIntent canceled before LMO task move");
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": LMO task move preparation failed: " + t.getMessage());
+        }
+        return false;
+    }
+
+    private static int getNotificationUserId(Object sbn) {
+        try {
+            int userId = (int) sbn.getClass().getMethod("getUserId").invoke(sbn);
+            return userId >= 0 ? userId : 0;
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    private static UserHandle getUserHandle(int userId) {
+        try {
+            return (UserHandle) UserHandle.class.getMethod("of", int.class)
+                    .invoke(null, userId);
+        } catch (Throwable ignored) {}
+        try {
+            java.lang.reflect.Constructor<UserHandle> constructor =
+                    UserHandle.class.getDeclaredConstructor(int.class);
+            constructor.setAccessible(true);
+            return constructor.newInstance(userId);
+        } catch (Throwable ignored) {}
+        try {
+            return (UserHandle) UserHandle.class.getField("CURRENT").get(null);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static List<?> getRunningTasks(Context ctx) {
+        try {
+            Object activityManager = ctx.getSystemService(Context.ACTIVITY_SERVICE);
+            if (activityManager == null) return null;
+            Method getRunningTasks = activityManager.getClass()
+                    .getMethod("getRunningTasks", int.class);
+            Object result = getRunningTasks.invoke(activityManager, 32);
+            return result instanceof List ? (List<?>) result : null;
+        } catch (Throwable t) {
+            Log.w(TAG, "LMO task move cannot query running tasks: " + t.getMessage());
+            return null;
+        }
+    }
+
+    private static int waitForNotificationTask(Context ctx, String packageName,
+            ComponentName target, long launchTime) {
+        long deadline = SystemClock.uptimeMillis() + 1800L;
+        while (SystemClock.uptimeMillis() < deadline) {
+            List<?> tasks = getRunningTasks(ctx);
+            if (tasks == null) return -1;
+            int taskId = findNotificationTask(tasks, packageName, target, launchTime);
+            if (taskId >= 0) return taskId;
+            SystemClock.sleep(80L);
+        }
+        return -1;
+    }
+
+    private static int findNotificationTask(List<?> tasks, String packageName,
+            ComponentName target, long launchTime) {
+        int fallbackTaskId = -1;
+        long fallbackActiveTime = Long.MIN_VALUE;
+        for (Object task : tasks) {
+            try {
+                int taskId = task.getClass().getField("taskId").getInt(task);
+                ComponentName top = (ComponentName) task.getClass()
+                        .getField("topActivity").get(task);
+                ComponentName base = (ComponentName) task.getClass()
+                        .getField("baseActivity").get(task);
+                ComponentName match = top != null ? top : base;
+                if (match == null || !packageName.equals(match.getPackageName())) continue;
+                if (target != null && !target.getClassName().equals(match.getClassName())
+                        && (base == null || !target.getClassName().equals(base.getClassName()))) {
+                    continue;
+                }
+                long activeTime = Long.MIN_VALUE;
+                try {
+                    activeTime = task.getClass().getField("lastActiveTime").getLong(task);
+                } catch (Throwable ignored) {}
+                if (activeTime >= launchTime || fallbackTaskId < 0) {
+                    if (activeTime >= fallbackActiveTime) {
+                        fallbackTaskId = taskId;
+                        fallbackActiveTime = activeTime;
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        return fallbackTaskId;
+    }
+
+    private static void requestLmoFreeformForTask(Context ctx, String packageName,
+            String activityName, int userId, int taskId, String reason) {
+        try {
+            Intent startFreeform = new Intent("com.libremobileos.freeform.START_FREEFORM")
+                    .setComponent(new ComponentName(
+                            "com.libremobileos.freeform",
+                            "com.libremobileos.freeform.receiver.StartFreeformReceiver"))
+                    .putExtra("packageName", packageName)
+                    .putExtra("activityName", activityName)
+                    .putExtra("userId", userId)
+                    .putExtra("taskId", taskId);
+            UserHandle user = getUserHandle(userId);
+            if (user == null) return;
+            ctx.sendBroadcastAsUser(startFreeform, user);
+            Log.i(TAG, reason + ": requested LMO Freeform task move for "
+                    + packageName + " taskId=" + taskId);
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": LMO Freeform task move failed: " + t.getMessage());
         }
     }
 
