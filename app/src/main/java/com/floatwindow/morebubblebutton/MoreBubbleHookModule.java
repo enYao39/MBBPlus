@@ -276,9 +276,11 @@ public class MoreBubbleHookModule extends XposedModule {
             final UserHandle finalUser = user;
             Runnable work = () -> {
                 try {
+                    Class<?> bubbleBarLocCls = clOrNull(controller.getClass().getClassLoader(),
+                            "com.android.wm.shell.shared.bubbles.BubbleBarLocation");
                     Method expand = findMethodSystemUi(controller.getClass(), "expandStackAndSelectBubble",
                             Intent.class, UserHandle.class, entryPoint != null ? entryPoint.getClass() : Object.class,
-                            clOrNull(controller.getClass().getClassLoader(), "com.android.wm.shell.shared.bubbles.BubbleBarLocation"));
+                            bubbleBarLocCls != null ? bubbleBarLocCls : Object.class);
                     if (expand == null) {
                         for (Method m : controller.getClass().getDeclaredMethods()) {
                             if (m.getName().equals("expandStackAndSelectBubble")
@@ -295,6 +297,13 @@ public class MoreBubbleHookModule extends XposedModule {
                         Log.i(TAG, reason + ": expanded app bubble for " + pkg);
                         runOnSysuiMain(bubblesManager, () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
                         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
+                    } else if (expandAppBubbleNewApi(controller, finalIntent, finalUser, entryPoint, pkg, reason)) {
+                        // Android 17 (Cinnamon Bun) / EvolutionX: BubbleController no longer exposes
+                        // expandStackAndSelectBubble(Intent, UserHandle, EntryPoint, BubbleBarLocation).
+                        // Mirror the system's own showAppBubble() implementation: build a TYPE_APP
+                        // Bubble and hand it to expandStackAndSelectAppBubble(Bubble, EntryPoint, ...).
+                        runOnSysuiMain(bubblesManager, () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
+                        runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
                     } else {
                         Log.w(TAG, reason + ": app bubble expand method not found");
                     }
@@ -309,6 +318,92 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) {
             Log.w(TAG, reason + ": app bubble schedule failed: " + t.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Android 17 / EvolutionX replacement for the removed
+     * expandStackAndSelectBubble(Intent, UserHandle, EntryPoint, BubbleBarLocation).
+     * Constructs a TYPE_APP Bubble exactly like the system's own IBubbles.showAppBubble() handler
+     * (BubbleController$IBubblesImpl) and invokes:
+     *   BubbleController.expandStackAndSelectAppBubble(Bubble, EntryPoint, UpdateLocationRequest)
+     */
+    private static boolean expandAppBubbleNewApi(Object controller, Intent intent, UserHandle user,
+            Object entryPoint, String pkg, String reason) {
+        try {
+            ClassLoader cl = controller.getClass().getClassLoader();
+            Class<?> bubbleCls = cl.loadClass("com.android.wm.shell.bubbles.Bubble");
+            Class<?> bubbleTypeCls = cl.loadClass("com.android.wm.shell.bubbles.Bubble$BubbleType");
+            Object bubbleType = Enum.valueOf((Class<? extends Enum>) bubbleTypeCls, "TYPE_APP");
+            String key = (String) bubbleCls.getMethod("getAppBubbleKeyForApp", String.class, UserHandle.class)
+                    .invoke(null, pkg, user);
+            android.graphics.drawable.Icon icon = buildAppBubbleIcon(controller, intent, pkg);
+            Object bubble = bubbleCls.getConstructor(Intent.class, UserHandle.class,
+                            android.graphics.drawable.Icon.class, bubbleTypeCls, String.class)
+                    .newInstance(intent, user, icon, bubbleType, key);
+
+            Class<?> entryPointCls = entryPoint != null ? entryPoint.getClass() : Object.class;
+            Class<?> updateReqCls = clOrNull(cl,
+                    "com.android.wm.shell.shared.bubbles.BubbleBarLocation$UpdateLocationRequest");
+            Method expandApp = updateReqCls != null
+                    ? findMethodSystemUi(controller.getClass(), "expandStackAndSelectAppBubble",
+                            bubbleCls, entryPointCls, updateReqCls)
+                    : null;
+            if (expandApp == null) {
+                for (Method m : controller.getClass().getDeclaredMethods()) {
+                    if (m.getName().equals("expandStackAndSelectAppBubble")
+                            && m.getParameterCount() == 3
+                            && m.getParameterTypes()[0] == bubbleCls) {
+                        m.setAccessible(true);
+                        expandApp = m;
+                        break;
+                    }
+                }
+            }
+            if (expandApp == null) {
+                Log.w(TAG, reason + ": app bubble expand method not found (new api)");
+                return false;
+            }
+            expandApp.invoke(controller, bubble, entryPoint, null);
+            Log.i(TAG, reason + ": expanded app bubble via expandStackAndSelectAppBubble for " + pkg);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": app bubble new api failed: " + t.getMessage());
+            return false;
+        }
+    }
+
+    private static android.graphics.drawable.Icon buildAppBubbleIcon(Object controller, Intent intent, String pkg) {
+        try {
+            Context ctx = (Context) getFieldSystemUi(controller, "mContext");
+            if (ctx == null) return null;
+            // Prefer the system's own icon provider (same as IBubbles.showAppBubble()).
+            Object bubbleData = getFieldSystemUi(controller, "mBubbleData");
+            Object provider = bubbleData != null ? getFieldSystemUi(bubbleData, "mAppInfoProvider") : null;
+            if (provider != null) {
+                Method getIcon = findMethodSystemUi(provider.getClass(), "getActivityInfoIcon",
+                        android.content.pm.PackageManager.class, Intent.class);
+                if (getIcon != null) {
+                    Object icon = getIcon.invoke(provider, ctx.getPackageManager(), intent);
+                    if (icon instanceof android.graphics.drawable.Icon) return (android.graphics.drawable.Icon) icon;
+                }
+            }
+            // Fallback: application icon rasterized to a bitmap.
+            android.graphics.drawable.Drawable d = ctx.getPackageManager().getApplicationIcon(pkg);
+            if (d instanceof android.graphics.drawable.BitmapDrawable) {
+                return android.graphics.drawable.Icon.createWithBitmap(
+                        ((android.graphics.drawable.BitmapDrawable) d).getBitmap());
+            }
+            int size = Math.max(48, (int) (48 * ctx.getResources().getDisplayMetrics().density));
+            android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                    size, size, android.graphics.Bitmap.Config.ARGB_8888);
+            android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
+            d.setBounds(0, 0, size, size);
+            d.draw(canvas);
+            return android.graphics.drawable.Icon.createWithBitmap(bmp);
+        } catch (Throwable t) {
+            Log.w(TAG, "buildAppBubbleIcon: " + t.getMessage());
+            return null;
         }
     }
 
