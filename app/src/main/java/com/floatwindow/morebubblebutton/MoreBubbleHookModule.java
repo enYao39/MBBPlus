@@ -407,9 +407,9 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     /**
-     * Adds the small bottom-center handle only to a real Heads-up content view.
-     * NotificationContentView is a FrameLayout with separate contracted/expanded/Heads-up
-     * children on Evolution17, so the handle stays inside the popup and disappears with it.
+     * Adds the small bottom-center handle only to a real Heads-up popup row.
+     * Evolution17 leaves NotificationContentView.mHeadsUpChild empty, so the row is the
+     * stable host and the strict row state keeps the handle out of the notification shade.
      */
     private static void updateHeadsUpSwipeHandle(Object contentViewObject) {
         if (!(contentViewObject instanceof ViewGroup)) return;
@@ -420,33 +420,39 @@ public class MoreBubbleHookModule extends XposedModule {
         }
         Context ctx = contentView.getContext();
         try {
-            View handle = contentView.findViewWithTag(HEADS_UP_HANDLE_TAG);
             boolean enabled = ModuleSettings.isSystemUiBubbleEnabled(ctx)
                     && ModuleSettings.getPopupPresentation(ctx)
                     == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE;
             Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
             Notification notification = getNotificationFromContentView(row);
-            Object headsUpChild = getFieldSystemUi(contentViewObject, "mHeadsUpChild");
             boolean isHeadsUp = isHeadsUpContentView(contentViewObject);
             boolean validNotification = notification != null
                     && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
                     && notification.contentIntent != null;
 
-            if (enabled || isHeadsUp) {
-                Log.d(TAG, "Swipe handle state: enabled=" + enabled
-                        + " headsUp=" + isHeadsUp
-                        + " row=" + (row != null)
-                        + " child=" + (headsUpChild != null)
-                        + " notification=" + (notification != null)
-                        + " contentIntent=" + (notification != null
-                        && notification.contentIntent != null));
-            }
-
-            if (!enabled || !isHeadsUp || headsUpChild == null || !validNotification) {
-                if (handle != null) handle.setVisibility(View.GONE);
+            // Evolution17 keeps mHeadsUpChild null and renders the Heads-up content through
+            // the row's entry adapter. Do not use that legacy child as a visibility gate.
+            if (!enabled || !isHeadsUp || !validNotification) {
+                View staleHandle = contentView.findViewWithTag(HEADS_UP_HANDLE_TAG);
+                if (staleHandle == null && row instanceof ViewGroup) {
+                    staleHandle = ((ViewGroup) row).findViewWithTag(HEADS_UP_HANDLE_TAG);
+                }
+                if (staleHandle != null) staleHandle.setVisibility(View.GONE);
                 return;
             }
 
+            // The row is the actual Heads-up popup container on Evolution17. Attaching to
+            // NotificationContentView makes the handle either clipped or unreachable because
+            // mHeadsUpChild is not populated on this build.
+            ViewGroup host = row instanceof ViewGroup ? (ViewGroup) row : contentView;
+            View handle = host.findViewWithTag(HEADS_UP_HANDLE_TAG);
+            if (handle == null) handle = contentView.findViewWithTag(HEADS_UP_HANDLE_TAG);
+            if (handle != null && handle.getParent() != host) {
+                if (handle.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) handle.getParent()).removeView(handle);
+                }
+                handle = null;
+            }
             if (handle == null) {
                 SwipeHandleView newHandle = new SwipeHandleView(ctx);
                 newHandle.setTag(HEADS_UP_HANDLE_TAG);
@@ -486,10 +492,13 @@ public class MoreBubbleHookModule extends XposedModule {
                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                         dp(ctx, 80), dp(ctx, 30), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
                 lp.bottomMargin = dp(ctx, 3);
-                contentView.addView(newHandle, lp);
+                host.addView(newHandle, lp);
                 handle = newHandle;
+                Log.i(TAG, "Heads-up swipe handle attached to "
+                        + host.getClass().getSimpleName());
             }
-            contentView.setClipChildren(false);
+            host.setClipChildren(false);
+            host.setClipToPadding(false);
             handle.bringToFront();
             handle.setAlpha(1f);
             handle.setContentDescription(getConfiguredOpenLabel(ctx));
@@ -518,20 +527,51 @@ public class MoreBubbleHookModule extends XposedModule {
                 && ((Integer) visibleTypeValue) == VISIBLE_TYPE_HEADS_UP;
     }
 
-    private static Notification getNotificationFromContentView(Object row) {
+    private static Object getNotificationSbnFromRow(Object row) {
         if (row == null) return null;
         try {
             Object adapter = getFieldSystemUi(row, "mEntryAdapter");
             Object sbn = adapter != null ? invokeSystemUi(adapter, "getSbn") : null;
-            if (sbn != null) return (Notification) invokeSystemUi(sbn, "getNotification");
+            if (sbn != null) return sbn;
         } catch (Throwable ignored) {}
         try {
             Object entry = getFieldSystemUi(row, "mEntry");
-            Object sbn = entry != null ? getFieldSystemUi(entry, "mSbn") : null;
+            return entry != null ? getFieldSystemUi(entry, "mSbn") : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object getNotificationEntryFromRow(Object row) {
+        if (row == null) return null;
+        Object entry = getFieldSystemUi(row, "mEntry");
+        if (entry != null) return entry;
+        Object adapter = getFieldSystemUi(row, "mEntryAdapter");
+        if (adapter == null) return null;
+        entry = getFieldSystemUi(adapter, "entry");
+        if (entry != null) return entry;
+        entry = invokeSystemUi(adapter, "getEntry");
+        return entry != null ? entry : invokeSystemUi(adapter, "getNotificationEntry");
+    }
+
+    private static Notification getNotificationFromContentView(Object row) {
+        Object sbn = getNotificationSbnFromRow(row);
+        try {
             return sbn != null ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    private static Object getHeadsUpRowFromHandle(View handle) {
+        if (handle == null) return null;
+        Object parent = handle.getParent();
+        Object row = getFieldSystemUi(parent, "mContainingNotification");
+        if (row != null) return row;
+        // When the handle is attached directly to ExpandableNotificationRow, the parent
+        // itself is the row and has isHeadsUpState().
+        return parent != null && findMethodSystemUi(parent.getClass(), "isHeadsUpState") != null
+                ? parent : null;
     }
 
     private static float swipeDistance(Context ctx) {
@@ -541,30 +581,37 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static void openNotificationFromHeadsUp(View handle) {
         try {
-            ViewGroup contentView = handle.getParent() instanceof ViewGroup
-                    ? (ViewGroup) handle.getParent() : null;
-            if (contentView == null) return;
-            Object row = getFieldSystemUi(contentView, "mContainingNotification");
-            Object entry = row != null ? getFieldSystemUi(row, "mEntry") : null;
-            if (entry == null) return;
+            Object row = getHeadsUpRowFromHandle(handle);
+            Object sbn = getNotificationSbnFromRow(row);
+            Object entry = getNotificationEntryFromRow(row);
+            if (sbn == null) return;
             if (isFreeformOpenMode(handle.getContext())) {
-                if (launchNotificationInFreeform(handle.getContext(), entry, "Heads-up swipe")) return;
+                if (launchNotificationInFreeformSbn(handle.getContext(), sbn,
+                        "Heads-up swipe")) return;
                 Log.i(TAG, "Heads-up swipe: freeform unavailable, falling back to Bubble");
             }
-            if (sBubblesManager != null
+            if (entry != null && sBubblesManager != null
                     && expandAppBubbleFromNotification(sBubblesManager, entry, "Heads-up swipe")) {
                 return;
             }
-            launchNotificationFullscreen(entry, "Heads-up swipe");
-            Log.w(TAG, "Heads-up swipe: BubblesManager is not ready");
+            launchNotificationFullscreenSbn(sbn, "Heads-up swipe");
+            if (entry == null) {
+                Log.w(TAG, "Heads-up swipe: NotificationEntry unavailable; used direct Intent fallback");
+            } else if (sBubblesManager == null) {
+                Log.w(TAG, "Heads-up swipe: BubblesManager is not ready");
+            }
         } catch (Throwable t) {
             Log.w(TAG, "Heads-up swipe open: " + t.getMessage());
         }
     }
 
     private static boolean launchNotificationInFreeform(Context ctx, Object entry, String reason) {
+        return launchNotificationInFreeformSbn(ctx,
+                getFieldSystemUi(entry, "mSbn"), reason);
+    }
+
+    private static boolean launchNotificationInFreeformSbn(Context ctx, Object sbn, String reason) {
         try {
-            Object sbn = getFieldSystemUi(entry, "mSbn");
             Notification notification = sbn != null
                     ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
             if (notification == null || notification.contentIntent == null) return false;
@@ -1183,8 +1230,11 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static boolean launchNotificationFullscreen(Object entry, String reason) {
+        return launchNotificationFullscreenSbn(getFieldSystemUi(entry, "mSbn"), reason);
+    }
+
+    private static boolean launchNotificationFullscreenSbn(Object sbn, String reason) {
         try {
-            Object sbn = getFieldSystemUi(entry, "mSbn");
             Notification notification = sbn != null
                     ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
             if (notification == null || notification.contentIntent == null) return false;
