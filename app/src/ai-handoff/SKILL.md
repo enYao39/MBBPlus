@@ -5,7 +5,7 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 
 # MoreBubbleButton 维护技能
 
-适用于后续 AI 接手本模块的修复、功能开发和验证任务。本项目由 AI Agent 全程编辑；目前只在 Evolution 17 实机上测试过。
+适用于后续 AI 接手本模块的修复、功能开发和验证任务。本项目由 AI Agent 全程编辑；Evolution 17 是主要实机验证基线，Lunaris AOSP 3.12 已针对通知注入路径做过兼容性验证。
 
 ## 必做步骤
 
@@ -13,7 +13,7 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 2. 只在本模块目录内工作，并遵守上级 `agents.md` 的边界约束。
 3. 修改前确认现有未提交内容是否属于当前任务；不要覆盖用户已有改动。
 4. 对代码改动使用 `apply_patch`，完成一个逻辑阶段后立即创建本地 commit；若用户要求版本更新，使用点号递增小版本并同步 versionCode。
-5. 至少执行 `git diff --check` 和 Debug 构建；如果设备可用，再进行安装和短时日志验证。
+5. 至少执行 `git diff --check` 和与任务匹配的构建；交付 APK 时执行 Release 构建。如果设备可用，再进行安装和短时日志验证。
 6. 最终报告提交号、构建结果、设备验证是否完成，以及仍受设备权限限制的项目。
 
 ## Freeform 处理规则
@@ -24,6 +24,7 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 - 如果代码运行在真正的 system UID 进程，LMO PendingIntent 路径的参数顺序必须与 AIDL 一致：包名、占位 Activity、`userId=-100`、`taskId=-1`、PendingIntent、宽、高、densityDpi。
 - 所有路径都必须最终支持 Bubble 和全屏回退。
 - 不要把“调用返回成功”当成“窗口可用”；要继续检查窗口是否创建、目标任务是否被移除，以及是否出现后台启动拦截。
+- `shouldShowBubbleButton` 必须兼容 Evolution 的无参变体和 Lunaris AOSP 3.12 的 `NotificationEntry` 参数变体。
 
 ## Heads-up 和设置界面规则
 
@@ -33,6 +34,12 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 - 横条底部间距范围为 `-10dp..24dp`；修改设置范围时必须同步更新 `ModuleSettings`、Compose 设置页、`SettingsProvider` 和中英文资源。
 - 中英文资源必须同步；英文采用 “Bubble” 和 “Freeform” 等短文案。
 - 设置项文案过长时优先缩短摘要或使用单独说明，不要让选择框被长字符串撑大。
+
+## Release 瘦身规则
+
+- Release 保持 R8 minify 和 resource shrink；调试专用依赖不得进入正式依赖图。
+- 设置图标优先使用 `material-icons-core` 或本地矢量资源，不要引入 `material-icons-extended`。
+- 本地缺少正式 release keystore 时可以使用 Gradle 的 debug keystore 回退做验证，但不得把该 APK 当作正式签名发布包。
 
 ## 构建和测试
 
@@ -47,7 +54,7 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 - 把任务拆成可回退的小阶段，每个阶段单独提交，commit message 使用简洁英文。
 - 不要凭设备序列号、个人绝对路径或历史日志推断环境；文档和命令使用 `<device-serial>` 等占位符。
 - 仅在用户要求或任务明确需要时安装 APK、采集 logcat、重启 SystemUI 或执行需要 root 的操作。
-- 发现行为依赖 Evolution 17 私有实现时，记录为“Evolution 17 已验证、其他环境未验证”，不要宣称通用 Android 兼容。
+- 发现行为依赖 ROM 私有实现时，明确记录“Evolution 17 为主要验证基线；Lunaris AOSP 3.12 仅验证通知注入兼容路径；其他环境未验证”，不要宣称通用 Android 兼容。
 
 ## 安全边界
 

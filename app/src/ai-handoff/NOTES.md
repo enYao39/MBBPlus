@@ -1,6 +1,6 @@
 # MoreBubbleButton 接手说明
 
-这是一份给后续维护者或其他 AI Agent 使用的项目说明。本项目的代码、调试、重构、文档和构建修改均由 AI Agent 编辑完成；当前只在 Evolution 17 实机上测试过，其他系统版本必须重新验证。本文件只记录代码结构、设计约束和可复用的验证方法，不包含设备序列号、用户目录、通知正文、完整日志或任何密钥。
+这是一份给后续维护者或其他 AI Agent 使用的项目说明。本项目的代码、调试、重构、文档和构建修改均由 AI Agent 编辑完成；Evolution 17 是主要实机验证基线，Lunaris AOSP 3.12 已针对当前通知注入路径做过兼容性验证，其他系统版本和未覆盖功能必须重新验证。本文件只记录代码结构、设计约束和可复用的验证方法，不包含设备序列号、用户目录、通知正文、完整日志或任何密钥。
 
 ## 项目边界
 
@@ -22,6 +22,13 @@
   - Compose 设置界面。
 - `app/src/main/res/values*/strings.xml`
   - 英文、简体中文和其他语言资源；涉及用户可见文本时同步更新。
+
+## 当前构建约束
+
+- Debug 用于设备调试，Release 用于交付；Release 保持 R8 与 resource shrink 开启。
+- 为控制 APK 体积，设置页只使用 `material-icons-core`；不要重新引入 `material-icons-extended` 或 Compose debug tooling。
+- 本地没有正式 release keystore 时，Gradle 允许 Release 回退到 debug keystore 以便验证；这类 APK 不能替代正式签名包。
+- 构建产物和 Gradle 缓存不属于源码，禁止提交到 Git。
 
 ## 当前行为约定
 
@@ -48,11 +55,19 @@ Evolution 衍生系统可能不暴露传统的 `FEATURE_FREEFORM_WINDOW_MANAGEME
 
 如果系统侧 AIDL 发生变化，优先重新检查上述公开源码和目标 ROM 的反编译结果，再修改手动 Parcel 编码，不要凭猜测调整事务号或参数顺序。
 
+Lunaris AOSP 3.12 的 `NotificationContentView.shouldShowBubbleButton` 可能接收一个
+`NotificationEntry` 参数，而 Evolution 变体可能是无参方法。通知按钮 hook 必须同时兼容这两种签名，
+并继续保留非锁屏过滤与 swipe 模式按钮显示逻辑；不要因为适配 Lunaris 而恢复“swipe 隐藏按钮”的旧行为。
+
 ## 建议验证流程
 
 ```sh
 # 在模块仓库根目录执行
+# 调试构建
 ./gradlew :app:assembleDebug --offline --no-daemon
+
+# 交付构建（R8/resource shrink）
+./gradlew :app:assembleRelease --no-daemon
 
 # 仅在用户明确要求安装测试时执行
 adb devices
@@ -79,10 +94,10 @@ adb -s <device-serial> logcat -v brief \
 
 ```text
 这是一个由 AI Agent 全程编辑的 MoreBubbleButton Android/Xposed 项目。
-当前只在 Evolution 17 上测试过。请先阅读本目录的 NOTES.md 和 SKILL.md，
+Evolution 17 是主要验证基线，Lunaris AOSP 3.12 只对当前通知注入兼容路径做过验证。请先阅读本目录的 NOTES.md 和 SKILL.md，
 再检查 git status、分支和现有 diff。不要覆盖用户修改，不要提交设备序列号、
 个人路径、通知正文、完整日志、APK 或密钥。代码修改使用 apply_patch；完成后
-执行 git diff --check、Debug 构建，并报告是否安装和实机验证。
+执行 git diff --check，并根据任务选择 Debug 或 Release 构建，报告是否安装和实机验证。
 ```
 
 如果任务涉及 SystemUI、Heads-up、Bubble 或 Freeform，Agent 必须同时核对通知所在状态（Heads-up、普通通知、锁屏）和打开回退链路，不要只验证“方法调用返回成功”。
