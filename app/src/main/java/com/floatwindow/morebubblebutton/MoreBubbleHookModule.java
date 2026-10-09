@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 import io.github.libxposed.api.XposedModule;
@@ -81,6 +82,10 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final long FORCED_BUBBLE_GRACE_MS = 8000L;
     private static final Map<String, PendingHeadsUpLaunch> sPendingHeadsUpLaunches =
             new ConcurrentHashMap<>();
+    // A row can invoke several SystemUI lifecycle callbacks during one frame. Keep at most one
+    // pending synchronization runnable per row so the handle never creates a second layout pass
+    // for every callback in the same frame.
+    private static final Map<View, Runnable> sPendingHeadsUpSyncs = new WeakHashMap<>();
 
     private void hookSystemUi(ClassLoader cl) {
         Log.i(TAG, "Hooking SystemUI...");
@@ -471,14 +476,11 @@ public class MoreBubbleHookModule extends XposedModule {
             Class<?> rowClass = cl.loadClass(
                     "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow");
             hookRowMethods(rowClass, "setHeadsUp", false);
-            hookRowMethods(rowClass, "setActualHeight", false);
-            hookRowMethods(rowClass, "onMeasure", false);
             hookRowMethods(rowClass, "onLayout", false);
             hookRowMethods(rowClass, "onAttachedToWindow", false);
             hookRowMethods(rowClass, "onDetachedFromWindow", false);
-            hookRowMethods(rowClass, "setClipToActualHeight", false);
-            hookRowMethods(rowClass, "setClipBottomAmount", false);
-            hookRowMethods(rowClass, "setBottomOverlap", false);
+            hookRowMethods(rowClass, "setUserExpanded", false);
+            hookRowMethods(rowClass, "setUserSwipingToExpandRow", false);
             hookRowMethods(rowClass, "setHeadsUpAnimatingAway", false);
             hookRowMethods(rowClass, "onNotificationUpdated", true);
             hookRowMethods(rowClass, "setBubbleClickListener", true);
@@ -535,6 +537,7 @@ public class MoreBubbleHookModule extends XposedModule {
                         Object result = chain.proceed();
                         Object row = chain.getThisObject();
                         if ("onDetachedFromWindow".equals(name)) {
+                            cancelHeadsUpRowSync(row);
                             cancelPendingForRow(row);
                             removeSwipeHandle(row);
                             return result;
@@ -543,6 +546,13 @@ public class MoreBubbleHookModule extends XposedModule {
                                 && method.getParameterCount() > 0
                                 && !Boolean.TRUE.equals(chain.getArg(0))) {
                             launchPendingForRow(row);
+                        }
+                        if (("setUserExpanded".equals(name)
+                                || "setUserSwipingToExpandRow".equals(name))
+                                && isRowExpandedOrSwiping(row)) {
+                            cancelHeadsUpRowSync(row);
+                            removeSwipeHandle(row);
+                            return result;
                         }
                         if (refreshBubble) {
                             prepareBubbleMetadata(getNotificationEntryFromRow(row));
@@ -576,21 +586,33 @@ public class MoreBubbleHookModule extends XposedModule {
     private static void postHeadsUpRowSync(Object row) {
         if (!(row instanceof View)) return;
         View rowView = (View) row;
-        Runnable sync = () -> syncHeadsUpSwipeHandle(row);
-        rowView.post(sync);
-        // Heads-up rows can be added before their first constrained measure. Recheck during
-        // the first part of the pin animation so the handle receives a real row height.
-        rowView.postDelayed(sync, 48L);
-        rowView.postDelayed(sync, 160L);
-        rowView.postDelayed(sync, 320L);
-        rowView.postDelayed(sync, 640L);
+        synchronized (sPendingHeadsUpSyncs) {
+            if (sPendingHeadsUpSyncs.containsKey(rowView)) return;
+            Runnable sync = () -> {
+                synchronized (sPendingHeadsUpSyncs) {
+                    sPendingHeadsUpSyncs.remove(rowView);
+                }
+                syncHeadsUpSwipeHandle(rowView);
+            };
+            sPendingHeadsUpSyncs.put(rowView, sync);
+            rowView.postOnAnimation(sync);
+        }
+    }
+
+    private static void cancelHeadsUpRowSync(Object row) {
+        if (!(row instanceof View)) return;
+        View rowView = (View) row;
+        synchronized (sPendingHeadsUpSyncs) {
+            Runnable sync = sPendingHeadsUpSyncs.remove(rowView);
+            if (sync != null) rowView.removeCallbacks(sync);
+        }
     }
 
     private static void syncHeadsUpSwipeHandle(Object row) {
         if (!(row instanceof ViewGroup)) return;
         ViewGroup host = (ViewGroup) row;
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            host.post(() -> syncHeadsUpSwipeHandle(row));
+            postHeadsUpRowSync(row);
             return;
         }
         Context ctx = host.getContext();
@@ -602,7 +624,8 @@ public class MoreBubbleHookModule extends XposedModule {
             boolean validNotification = notification != null
                     && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
                     && notification.contentIntent != null;
-            if (!enabled || !isHeadsUpRow(row) || !validNotification) {
+            if (!enabled || !isHeadsUpRow(row) || !validNotification
+                    || isRowExpandedOrSwiping(row)) {
                 removeSwipeHandle(row);
                 return;
             }
@@ -676,14 +699,27 @@ public class MoreBubbleHookModule extends XposedModule {
                 addHandleToRow(host, handle, null);
             }
             positionSwipeHandle(host, handle, ctx);
-            handle.bringToFront();
-            handle.setAlpha(1f);
-            handle.setContentDescription(getConfiguredOpenLabel(ctx));
-            handle.invalidate();
-            handle.setVisibility(View.VISIBLE);
+            if (host.indexOfChild(handle) != host.getChildCount() - 1) {
+                handle.bringToFront();
+            }
+            if (handle.getAlpha() != 1f) handle.setAlpha(1f);
+            String label = getConfiguredOpenLabel(ctx);
+            if (!label.contentEquals(handle.getContentDescription())) {
+                handle.setContentDescription(label);
+            }
+            if (handle.getVisibility() != View.VISIBLE) handle.setVisibility(View.VISIBLE);
         } catch (Throwable t) {
             Log.w(TAG, "sync Heads-up handle: " + t.getMessage());
         }
+    }
+
+    private static boolean isRowExpandedOrSwiping(Object row) {
+        Object value = invokeSystemUi(row, "isUserSwipingToExpandRow");
+        if (Boolean.TRUE.equals(value)) return true;
+        value = invokeSystemUi(row, "isUserExpanded");
+        if (Boolean.TRUE.equals(value)) return true;
+        value = invokeSystemUi(row, "isExpanded");
+        return Boolean.TRUE.equals(value);
     }
 
     private static boolean isHeadsUpRow(Object row) {
@@ -724,11 +760,6 @@ public class MoreBubbleHookModule extends XposedModule {
         }
         if (visibleBottom <= 0) {
             handle.setVisibility(View.INVISIBLE);
-            Log.d(TAG, "Heads-up handle waiting for row layout: row="
-                    + host.getClass().getSimpleName()
-                    + " size=" + layoutHeight + "x" + measuredHeight
-                    + " actual=" + actualHeight
-                    + " clip=" + clipBounds);
             return;
         }
         int topMargin = Math.max(visibleTop,
@@ -768,14 +799,6 @@ public class MoreBubbleHookModule extends XposedModule {
         if (handle.getMeasuredWidth() != width || handle.getMeasuredHeight() != handleHeight) {
             handle.measure(exactWidth, exactHeight);
         }
-        Log.d(TAG, "Heads-up handle geometry: row=" + host.getClass().getSimpleName()
-                + " size=" + layoutHeight + "x" + measuredHeight
-                + " actual=" + actualHeight
-                + " visibleBottom=" + visibleBottom
-                + " clip=" + clipBounds
-                + " top=" + topMargin
-                + " handle=" + handle.getMeasuredWidth() + "x" + handle.getMeasuredHeight()
-                + " visibility=" + handle.getVisibility());
     }
 
     private static void addHandleToRow(ViewGroup host, View handle,
