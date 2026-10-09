@@ -1,7 +1,10 @@
 package com.floatwindow.morebubblebutton.ui
 
+import android.content.Context
+import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -44,6 +47,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -58,11 +62,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.floatwindow.morebubblebutton.BuildConfig
 import com.floatwindow.morebubblebutton.ModuleSettings
 import com.floatwindow.morebubblebutton.MoreBubbleHookModule
 import com.floatwindow.morebubblebutton.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.concurrent.TimeUnit
 
 private val SettingsCardShape = RoundedCornerShape(28.dp)
 
@@ -75,6 +83,13 @@ fun SettingsScreen() {
     var positionMode by remember { mutableIntStateOf(ModuleSettings.getPositionMode(ctx)) }
     var sliderX by remember { mutableFloatStateOf(ModuleSettings.getPosX(ctx).toFloat()) }
     var sliderY by remember { mutableFloatStateOf(ModuleSettings.getPosY(ctx).toFloat()) }
+    var rootCheckKey by remember { mutableIntStateOf(0) }
+    var rootAccess by remember { mutableStateOf<Boolean?>(null) }
+
+    LaunchedEffect(rootCheckKey) {
+        rootAccess = null
+        rootAccess = withContext(Dispatchers.IO) { hasRootAccess() }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -146,7 +161,13 @@ fun SettingsScreen() {
                             },
                             shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                             modifier = Modifier.weight(1f),
-                            label = { Text(stringResource(R.string.position_mode_follow)) }
+                            label = {
+                                Text(
+                                    text = stringResource(R.string.position_mode_follow),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         )
                         SegmentedButton(
                             selected = positionMode == 1,
@@ -157,7 +178,13 @@ fun SettingsScreen() {
                             },
                             shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                             modifier = Modifier.weight(1f),
-                            label = { Text(stringResource(R.string.position_mode_second)) }
+                            label = {
+                                Text(
+                                    text = stringResource(R.string.position_mode_second),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         )
                     }
 
@@ -234,10 +261,17 @@ fun SettingsScreen() {
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    RootAccessStatus(
+                        hasRootAccess = rootAccess,
+                        onOpenManager = { openRootManager(ctx) },
+                        onCheckAgain = { rootCheckKey++ }
+                    )
                     Spacer(modifier = Modifier.height(16.dp))
                     Button(
-                        onClick = ::restartSystemUi,
+                        onClick = { restartSystemUi(ctx) },
                         modifier = Modifier.fillMaxWidth(),
+                        enabled = rootAccess == true,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.primary
                         )
@@ -268,6 +302,59 @@ fun SettingsScreen() {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 14.dp)
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RootAccessStatus(
+    hasRootAccess: Boolean?,
+    onOpenManager: () -> Unit,
+    onCheckAgain: () -> Unit
+) {
+    val title = stringResource(R.string.root_status_title)
+    val summary = when (hasRootAccess) {
+        true -> stringResource(R.string.root_status_granted)
+        false -> stringResource(R.string.root_status_missing)
+        null -> stringResource(R.string.root_status_checking)
+    }
+    val summaryColor = if (hasRootAccess == false) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = summary,
+            style = MaterialTheme.typography.bodySmall,
+            color = summaryColor
+        )
+        if (hasRootAccess == false) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onOpenManager,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(stringResource(R.string.root_open_manager), maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = onCheckAgain,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(stringResource(R.string.root_check_again), maxLines = 1)
                 }
             }
         }
@@ -489,21 +576,83 @@ private fun applyPosition(ctx: android.content.Context) {
     }
 }
 
-private fun restartSystemUi() {
-    Handler(Looper.getMainLooper()).postDelayed({
-        Thread {
-            try {
-                val process = Runtime.getRuntime().exec(
-                    arrayOf(
-                        "su",
-                        "-c",
-                        "killall com.google.android.apps.nexuslauncher com.android.launcher3 com.android.systemui 2>/dev/null"
-                    )
-                )
-                process.waitFor()
-            } catch (_: Throwable) {
-                // Root is optional for the settings screen; users can restart the processes manually.
+private val rootManagerPackages = listOf(
+    "com.rifsxd.ksunext",
+    "me.weishu.kernelsu",
+    "com.topjohnwu.magisk"
+)
+
+private fun hasRootAccess(): Boolean {
+    return try {
+        val result = runRootCommand("id")
+        !result.timedOut && result.exitCode == 0 && result.output.contains("uid=0")
+    } catch (_: Throwable) {
+        false
+    }
+}
+
+private fun openRootManager(ctx: Context) {
+    val managerIntent = rootManagerPackages
+        .asSequence()
+        .mapNotNull { packageName -> ctx.packageManager.getLaunchIntentForPackage(packageName) }
+        .firstOrNull()
+
+    if (managerIntent == null) {
+        Toast.makeText(ctx, R.string.root_manager_missing, Toast.LENGTH_LONG).show()
+        return
+    }
+
+    managerIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    ctx.startActivity(managerIntent)
+}
+
+private data class RootCommandResult(
+    val exitCode: Int,
+    val output: String,
+    val timedOut: Boolean = false
+)
+
+private fun restartSystemUi(ctx: android.content.Context) {
+    Thread {
+        val result = try {
+            val rootCheck = runRootCommand("id")
+            if (rootCheck.timedOut || rootCheck.exitCode != 0 || !rootCheck.output.contains("uid=0")) {
+                false
+            } else {
+                // EvolutionX uses NexusLauncher; keep Launcher3 as a fallback for other ROM builds.
+                listOf(
+                    "com.google.android.apps.nexuslauncher",
+                    "com.android.launcher3",
+                    "com.android.systemui"
+                ).forEach { packageName ->
+                    // An absent package must not make the whole restart operation fail.
+                    runRootCommand("killall $packageName 2>/dev/null || true")
+                }
+                true
             }
-        }.start()
-    }, 250)
+        } catch (_: Throwable) {
+            false
+        }
+
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(
+                ctx,
+                if (result) R.string.restart_success else R.string.restart_failed,
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }.start()
+}
+
+private fun runRootCommand(command: String): RootCommandResult {
+    val process = ProcessBuilder("su", "-c", command)
+        .redirectErrorStream(true)
+        .start()
+    val finished = process.waitFor(5, TimeUnit.SECONDS)
+    if (!finished) {
+        process.destroyForcibly()
+        return RootCommandResult(-1, "", timedOut = true)
+    }
+    val output = process.inputStream.bufferedReader().use { it.readText() }
+    return RootCommandResult(process.exitValue(), output)
 }

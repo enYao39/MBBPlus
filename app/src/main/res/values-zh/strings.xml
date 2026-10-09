@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">更多消息气泡</string>
+    <string name="bubble_button_label">消息气泡</string>
     <string name="module_description">在 Pixel Launcher 最近任务和通知栏中添加消息气泡按钮。</string>
     <string name="settings_subtitle">将支持的应用变为消息气泡。</string>
     <string name="settings_language_auto">界面语言会跟随系统自动切换</string>
@@ -30,6 +31,15 @@
     <string name="restart_title">应用更改</string>
     <string name="restart_summary">重启 Pixel Launcher 和系统界面，使 Hook 与位置更改生效。</string>
     <string name="restart_button">重启启动器和系统界面</string>
+    <string name="restart_success">已发送重启命令。</string>
+    <string name="restart_failed">无法重启启动器和系统界面，请检查 root 权限。</string>
+    <string name="root_status_title">Root 权限</string>
+    <string name="root_status_checking">正在检测 root 权限…</string>
+    <string name="root_status_granted">已获得权限，可以使用重启功能。</string>
+    <string name="root_status_missing">尚未获得权限，请先在 KernelSU Next 中允许 MoreBubbleButton 获取 root。</string>
+    <string name="root_open_manager">打开 KernelSU</string>
+    <string name="root_check_again">重新检测</string>
+    <string name="root_manager_missing">未安装或无法打开 KernelSU Next。</string>
     <string name="version_value">版本 %1$s</string>
     <string name="compatibility_value">Android 16+ · LSPosed Modern API</string>
     <string name="about_language">支持中文和英文，语言会根据系统设置自动检测。</string>

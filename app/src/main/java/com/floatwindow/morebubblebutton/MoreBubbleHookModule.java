@@ -22,6 +22,7 @@ import android.widget.Toast;
 
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -818,8 +819,10 @@ public class MoreBubbleHookModule extends XposedModule {
         int styleId = res.getIdentifier("OverviewActionButton.Blur", "style", pkg);
         if (styleId == 0) styleId = res.getIdentifier("OverviewActionButton", "style", pkg);
         Button btn = (styleId != 0) ? new Button(ctx, null, 0, styleId) : new Button(ctx);
-        btn.setText("消息气泡");
-        btn.setContentDescription("消息气泡");
+        String label = getBubbleButtonLabel(ctx);
+        btn.setText(label);
+        btn.setContentDescription(label);
+        btn.setTooltipText(label);
         btn.setId(View.generateViewId());
         btn.setTag("bubble_button");
 
@@ -972,7 +975,7 @@ public class MoreBubbleHookModule extends XposedModule {
 
             View tv = menuItem.findViewById(res.getIdentifier("text", "id", pkg));
             if (tv instanceof android.widget.TextView)
-                ((android.widget.TextView) tv).setText("消息气泡");
+                ((android.widget.TextView) tv).setText(getBubbleButtonLabel(ctx));
 
             LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) menuItem.getLayoutParams();
             lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
@@ -1132,6 +1135,18 @@ public class MoreBubbleHookModule extends XposedModule {
     private static void showToast(Context ctx, String msg) {
         new android.os.Handler(Looper.getMainLooper()).post(() ->
                 Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show());
+    }
+
+    private static String getBubbleButtonLabel(Context hostContext) {
+        try {
+            Context moduleContext = hostContext.createPackageContext(
+                    "com.floatwindow.morebubblebutton", Context.CONTEXT_IGNORE_SECURITY);
+            return moduleContext.getString(R.string.bubble_button_label);
+        } catch (Throwable ignored) {
+            Locale locale = hostContext.getResources().getConfiguration().getLocales().get(0);
+            return locale != null && "zh".equalsIgnoreCase(locale.getLanguage())
+                    ? "消息气泡" : "Bubble";
+        }
     }
 
     /**

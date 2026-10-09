@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">MoreBubbleButton</string>
+    <string name="bubble_button_label">Bubble</string>
     <string name="module_description">Add a Message Bubble button to the Pixel Launcher recents view and notification shade.</string>
     <string name="settings_subtitle">Turn any supported app into a message bubble.</string>
     <string name="settings_language_auto">Language follows the system automatically</string>
@@ -16,7 +17,7 @@
     <string name="feature_system_ui_title">Notification bubble button</string>
     <string name="feature_system_ui_summary">Show a bubble button for regular notifications that can open an app.</string>
     <string name="position_mode_title">Display row</string>
-    <string name="position_mode_follow">Follow original button</string>
+    <string name="position_mode_follow">Follow original</string>
     <string name="position_mode_second">Second row</string>
     <string name="position_mode_follow_summary">The button uses the position chosen by Pixel Launcher.</string>
     <string name="position_x">X axis</string>
@@ -30,6 +31,15 @@
     <string name="restart_title">Apply changes</string>
     <string name="restart_summary">Restart Pixel Launcher and System UI to apply hook and position changes.</string>
     <string name="restart_button">Restart launcher &amp; System UI</string>
+    <string name="restart_success">Restart command sent.</string>
+    <string name="restart_failed">Could not restart Launcher/System UI. Check root permission.</string>
+    <string name="root_status_title">Root permission</string>
+    <string name="root_status_checking">Checking root access…</string>
+    <string name="root_status_granted">Granted. The restart action is available.</string>
+    <string name="root_status_missing">Not granted. Allow MoreBubbleButton in KernelSU Next before restarting.</string>
+    <string name="root_open_manager">Open KernelSU</string>
+    <string name="root_check_again">Check again</string>
+    <string name="root_manager_missing">KernelSU Next is not installed or could not be opened.</string>
     <string name="version_value">Version %1$s</string>
     <string name="compatibility_value">Android 16+ · LSPosed Modern API</string>
     <string name="about_language">English and Simplified Chinese are detected from the system language.</string>
