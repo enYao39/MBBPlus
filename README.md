@@ -1,6 +1,6 @@
 # MoreBubbleButton
 
-MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部修改均由 aicode 完成，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心添加 Bubble/Freeform 能力。
+MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部修改均由 AICoding 完成，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心添加 Bubble/Freeform 能力。
 
 > 当前仅在 Evolution 17 实机上测试过。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
 

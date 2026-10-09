@@ -55,6 +55,14 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final String LMO_FREEFORM_DESCRIPTOR =
             "com.libremobileos.freeform.ILMOFreeformUIService";
     private static final int LMO_START_APP_TRANSACTION = 1;
+    // Evolution and Lunaris use different framework ids for the ImageView that
+    // NotificationContentView passes to applyBubbleAction(). Keep both ids here
+    // instead of scanning arbitrary notification ImageViews.
+    private static final int EVOLUTION_BUBBLE_ICON_ID = 0x01020281;
+    private static final int LUNARIS_BUBBLE_ICON_ID = 0x0102024f;
+    private static final String LUNARIS_SYSTEMUI_PACKAGE = "com.android.systemui";
+    private static final String LUNARIS_FREEFORM_ICON =
+            "desktop_mode_ic_handle_menu_floating";
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -68,15 +76,16 @@ public class MoreBubbleHookModule extends XposedModule {
                 || "com.android.launcher3".equals(pkg)) {
             mLauncherClassLoader = param.getDefaultClassLoader();
             hookLauncher(param);
-        } else if ("com.android.systemui".equals(pkg)) {
-            // SystemUI 不支持热重载，只在首次加载时 hook
-            if (!param.isFirstPackage()) return;
-            ClassLoader cl = param.getDefaultClassLoader();
-            hookSystemUi(cl);
+        } else if ("com.android.systemui".equals(pkg) || "android".equals(pkg)) {
+            // Depending on the LSPosed/Android build, SystemUI may be reported as its
+            // package name or through the shared "android" process alias. Hook whichever
+            // callback arrives first, and never install the same hooks twice.
+            hookSystemUiOnce(param.getDefaultClassLoader(), pkg);
         }
     }
 
     private ClassLoader mSystemUiClassLoader;
+    private static volatile boolean sSystemUiHookInstalled;
     private static final Map<String, Long> sForcedBubbleKeys = new ConcurrentHashMap<>();
     private static final long FORCED_BUBBLE_GRACE_MS = 8000L;
     private static final Map<String, PendingHeadsUpLaunch> sPendingHeadsUpLaunches =
@@ -94,6 +103,23 @@ public class MoreBubbleHookModule extends XposedModule {
     // and cleared when setOnKeyguard(false) is called. Used to prevent
     // scheduling sync runnables for newly-inflated rows on the lock screen.
     private static volatile boolean sOnKeyguard;
+
+    private void hookSystemUiOnce(ClassLoader cl, String packageName) {
+        if (cl == null || sSystemUiHookInstalled) return;
+        synchronized (MoreBubbleHookModule.class) {
+            if (sSystemUiHookInstalled) return;
+            try {
+                cl.loadClass("com.android.systemui.statusbar.notification.row.NotificationContentView");
+            } catch (Throwable t) {
+                Log.w(TAG, "SystemUI hook deferred for " + packageName + ": " + t.getMessage());
+                return;
+            }
+            mSystemUiClassLoader = cl;
+            hookSystemUi(cl);
+            sSystemUiHookInstalled = true;
+            Log.i(TAG, "SystemUI hooks installed from " + packageName);
+        }
+    }
 
     private void hookSystemUi(ClassLoader cl) {
         Log.i(TAG, "Hooking SystemUI...");
@@ -215,7 +241,9 @@ public class MoreBubbleHookModule extends XposedModule {
             Log.w(TAG, "Hook NotificationEntry canBubble: " + t.getMessage());
         }
 
-        // 3. BubblesManager.expandStackAndSelectBubble - 拦截系统点击调用
+        // 3. Intercept the native NotificationEntry route so the notification
+        // button always uses the module's Bubble/Freeform action. Lunaris uses
+        // this callback for the native notification Bubble button.
         try {
             Class<?> bubblesCls = cl.loadClass("com.android.systemui.wmshell.BubblesManager");
             hookBubblesManagerConstructors(bubblesCls);
@@ -235,15 +263,21 @@ public class MoreBubbleHookModule extends XposedModule {
                         Object entry = chain.getArg(0);
                         if (entry != null) {
                             Object sbn = getFieldSystemUi(entry, "mSbn");
-                            Notification notif = sbn != null ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
-                            if (notif != null && (notif.flags & 0x40) == 0 && notif.contentIntent != null) {
-                                if (!expandAppBubbleFromNotification(chain.getThisObject(), entry, "expand guard")) {
+                            Notification notif = sbn != null
+                                    ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
+                            if (notif != null
+                                    && (notif.flags & Notification.FLAG_ONGOING_EVENT) == 0
+                                    && notif.contentIntent != null) {
+                                if (!expandAppBubbleFromNotification(
+                                        chain.getThisObject(), entry, "expand guard")) {
                                     launchNotificationFullscreen(entry, "expand guard");
                                 }
                                 return null;
                             }
                         }
-                    } catch (Throwable t) { Log.w(TAG, "expand guard: " + t.getMessage()); }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "expand guard: " + t.getMessage());
+                    }
                     return chain.proceed();
                 });
                 Log.i(TAG, "Hooked BubblesManager.expandStackAndSelectBubble OK");
@@ -252,7 +286,9 @@ public class MoreBubbleHookModule extends XposedModule {
             }
         } catch (Throwable t) { Log.w(TAG, "Hook BubblesManager: " + t.getMessage()); }
 
-        // 4. BubblesManager.onUserChangedBubble - 非 bubble 通知首次点击走这里，原生只折叠 shade。
+        // 4. Keep the user-change callback on the same module-controlled route.
+        // On Lunaris this is the callback used after the native button changes
+        // the notification Bubble state.
         try {
             Class<?> bubblesCls = cl.loadClass("com.android.systemui.wmshell.BubblesManager");
             java.lang.reflect.Method onUserChanged = null;
@@ -272,12 +308,15 @@ public class MoreBubbleHookModule extends XposedModule {
                         boolean enabled = (boolean) chain.getArg(1);
                         Object entry = chain.getArg(0);
                         if (enabled && entry != null) {
-                            if (!expandAppBubbleFromNotification(chain.getThisObject(), entry, "user change")) {
+                            if (!expandAppBubbleFromNotification(
+                                    chain.getThisObject(), entry, "user change")) {
                                 launchNotificationFullscreen(entry, "user change");
                             }
                             return null;
                         }
-                    } catch (Throwable t) { Log.w(TAG, "user change bubble: " + t.getMessage()); }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "user change bubble: " + t.getMessage());
+                    }
                     return chain.proceed();
                 });
                 Log.i(TAG, "Hooked BubblesManager.onUserChangedBubble OK");
@@ -297,20 +336,26 @@ public class MoreBubbleHookModule extends XposedModule {
             hook(bubbleClick).intercept(chain -> {
                 Object adapter = chain.getThisObject();
                 Context context = getNotificationAdapterContext(adapter);
-                if (!isFreeformOpenMode(context)) {
-                    return chain.proceed();
-                }
                 Object entry = getFieldSystemUi(adapter, "entry");
-                if (entry != null && launchNotificationInFreeform(context, entry,
-                        "Bubble button")) {
-                    if (sBubblesManager != null) {
-                        dismissClickedNotificationIfAutoCancel(sBubblesManager, entry);
-                        collapseShadeFromManager(sBubblesManager);
+                if (entry != null) {
+                    if (isFreeformOpenMode(context)) {
+                        if (launchNotificationInFreeform(context, entry, "Bubble button")) {
+                            if (sBubblesManager != null) {
+                                dismissClickedNotificationIfAutoCancel(sBubblesManager, entry);
+                                collapseShadeFromManager(sBubblesManager);
+                            }
+                            Log.i(TAG, "Bubble button handled by Freeform");
+                            return null;
+                        }
+                        Log.i(TAG, "Bubble button: Freeform unavailable, using Bubble");
+                    } else if (sBubblesManager != null
+                            && expandAppBubbleFromNotification(sBubblesManager, entry,
+                            "Bubble button")) {
+                        Log.i(TAG, "Bubble button handled by Bubble");
+                        return null;
                     }
-                    Log.i(TAG, "Bubble button handled by Freeform");
-                    return null;
                 }
-                Log.i(TAG, "Bubble button: Freeform unavailable, using Bubble");
+                // Preserve the native path if the module cannot construct an app Bubble.
                 return chain.proceed();
             });
             Log.i(TAG, "Hooked NotificationEntryAdapter.onNotificationBubbleIconClicked OK");
@@ -398,13 +443,16 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     /**
-     * NotificationContentView uses the framework id 0x01020281 for the
-     * ImageView it passes to applyBubbleAction(). Using that stable id avoids
-     * replacing unrelated app notification ImageViews.
+     * NotificationContentView uses a stable framework id for the ImageView it
+     * passes to applyBubbleAction(). Evolution and Lunaris do not use the same
+     * id, so try both known ids while avoiding a broad ImageView tree scan.
      */
     private static void replaceFreeformPopupIcon(View root, Context ctx) {
         if (root == null || ctx == null) return;
-        View iconView = root.findViewById(0x01020281);
+        View iconView = root.findViewById(LUNARIS_BUBBLE_ICON_ID);
+        if (!(iconView instanceof android.widget.ImageView)) {
+            iconView = root.findViewById(EVOLUTION_BUBBLE_ICON_ID);
+        }
         if (!(iconView instanceof android.widget.ImageView)) return;
         android.graphics.drawable.Drawable icon = getFreeformActionIcon(
                 ctx, ctx.getResources(), ctx.getPackageName());
@@ -1387,7 +1435,6 @@ public class MoreBubbleHookModule extends XposedModule {
                 Log.w(TAG, reason + ": LMO two-stage task was not created");
                 return;
             }
-
             ActivityOptions options = ActivityOptions.makeBasic();
             setLaunchTaskId.invoke(options, taskId);
             setPendingIntentBackgroundStartAllowed(options);
@@ -2081,33 +2128,69 @@ public class MoreBubbleHookModule extends XposedModule {
             String key = (String) bubbleCls.getMethod("getAppBubbleKeyForApp", String.class, UserHandle.class)
                     .invoke(null, pkg, user);
             android.graphics.drawable.Icon icon = buildAppBubbleIcon(controller, intent, pkg);
-            Object bubble = bubbleCls.getConstructor(Intent.class, UserHandle.class,
-                            android.graphics.drawable.Icon.class, bubbleTypeCls, String.class)
-                    .newInstance(intent, user, icon, bubbleType, key);
-
-            Class<?> entryPointCls = entryPoint != null ? entryPoint.getClass() : Object.class;
-            Class<?> updateReqCls = clOrNull(cl,
-                    "com.android.wm.shell.shared.bubbles.BubbleBarLocation$UpdateLocationRequest");
-            Method expandApp = updateReqCls != null
-                    ? findMethodSystemUi(controller.getClass(), "expandStackAndSelectAppBubble",
-                            bubbleCls, entryPointCls, updateReqCls)
-                    : null;
-            if (expandApp == null) {
-                for (Method m : controller.getClass().getDeclaredMethods()) {
-                    if (m.getName().equals("expandStackAndSelectAppBubble")
-                            && m.getParameterCount() == 3
-                            && m.getParameterTypes()[0] == bubbleCls) {
-                        m.setAccessible(true);
-                        expandApp = m;
-                        break;
+            Object bubble = null;
+            // Evolution's Android 17 build has a five-argument constructor,
+            // while Lunaris v3.12 adds the main/background Executor pair.
+            for (java.lang.reflect.Constructor<?> constructor
+                    : bubbleCls.getDeclaredConstructors()) {
+                Class<?>[] types = constructor.getParameterTypes();
+                if (types.length == 5
+                        && types[0] == Intent.class
+                        && types[1] == UserHandle.class
+                        && types[2] == android.graphics.drawable.Icon.class
+                        && types[3] == bubbleTypeCls
+                        && types[4] == String.class) {
+                    constructor.setAccessible(true);
+                    bubble = constructor.newInstance(intent, user, icon, bubbleType, key);
+                    break;
+                }
+                if (types.length == 7
+                        && types[0] == Intent.class
+                        && types[1] == UserHandle.class
+                        && types[2] == android.graphics.drawable.Icon.class
+                        && types[3] == bubbleTypeCls
+                        && types[4] == String.class
+                        && java.util.concurrent.Executor.class.isAssignableFrom(types[5])
+                        && java.util.concurrent.Executor.class.isAssignableFrom(types[6])) {
+                    Object mainExecutor = getFieldSystemUi(controller, "mMainExecutor");
+                    Object backgroundExecutor = getFieldSystemUi(controller, "mBackgroundExecutor");
+                    java.util.concurrent.Executor fallbackExecutor = command -> command.run();
+                    if (!(backgroundExecutor instanceof java.util.concurrent.Executor)) {
+                        backgroundExecutor = fallbackExecutor;
                     }
+                    if (!(mainExecutor instanceof java.util.concurrent.Executor)) {
+                        mainExecutor = fallbackExecutor;
+                    }
+                    constructor.setAccessible(true);
+                    bubble = constructor.newInstance(intent, user, icon, bubbleType, key,
+                            mainExecutor, backgroundExecutor);
+                    break;
+                }
+            }
+            if (bubble == null) {
+                Log.w(TAG, reason + ": compatible app Bubble constructor not found");
+                return false;
+            }
+
+            Method expandApp = null;
+            for (Method m : controller.getClass().getDeclaredMethods()) {
+                if (!m.getName().equals("expandStackAndSelectAppBubble")) continue;
+                Class<?>[] types = m.getParameterTypes();
+                if ((types.length == 2 || types.length == 3) && types[0] == bubbleCls) {
+                    m.setAccessible(true);
+                    expandApp = m;
+                    break;
                 }
             }
             if (expandApp == null) {
                 Log.w(TAG, reason + ": app bubble expand method not found (new api)");
                 return false;
             }
-            expandApp.invoke(controller, bubble, entryPoint, null);
+            if (expandApp.getParameterCount() == 2) {
+                expandApp.invoke(controller, bubble, entryPoint);
+            } else {
+                expandApp.invoke(controller, bubble, entryPoint, null);
+            }
             Log.i(TAG, reason + ": expanded app bubble via expandStackAndSelectAppBubble for " + pkg);
             return true;
         } catch (Throwable t) {
@@ -2350,10 +2433,14 @@ public class MoreBubbleHookModule extends XposedModule {
             Notification.BubbleMetadata.Builder builder = new Notification.BubbleMetadata.Builder();
             builder.setIntent(notif.contentIntent);
             builder.setDeleteIntent(notif.deleteIntent);
+            android.graphics.drawable.Icon notificationIcon = null;
             int iconResId = 0;
             try {
                 java.lang.reflect.Method getSmall = notif.getClass().getMethod("getSmallIcon");
                 Object smallIcon = getSmall.invoke(notif);
+                if (smallIcon instanceof android.graphics.drawable.Icon) {
+                    notificationIcon = (android.graphics.drawable.Icon) smallIcon;
+                }
                 if (smallIcon != null) {
                     java.lang.reflect.Method getRes = smallIcon.getClass().getMethod("getResId");
                     iconResId = (int) getRes.invoke(smallIcon);
@@ -2361,19 +2448,58 @@ public class MoreBubbleHookModule extends XposedModule {
             } catch (Throwable ignore) {}
             String pkg = null;
             try {
-                java.lang.reflect.Method m = notif.getClass().getMethod("getPackageName");
-                pkg = (String) m.invoke(notif);
-            } catch (Throwable ignore) {}
-            try {
-                if (iconResId != 0) {
-                    builder.getClass().getMethod("setIcon", int.class).invoke(builder, iconResId);
-                } else if (pkg != null) {
-                    builder.getClass().getMethod("setShortcutId", String.class).invoke(builder, pkg);
-                } else {
-                    return;
+                Object sbn = getFieldSystemUi(entry, "mSbn");
+                if (sbn != null) {
+                    Object value = invokeSystemUi(sbn, "getPackageName");
+                    if (value instanceof String) pkg = (String) value;
                 }
-            } catch (Throwable t) {
-                Log.w(TAG, "icon/shortcut set failed: " + t.getMessage());
+            } catch (Throwable ignore) {}
+
+            boolean iconSet = false;
+            // Android 16/Lunaris exposes BubbleMetadata.Builder.setIcon(Icon). Passing the
+            // notification's Icon preserves its package/user metadata and is required by
+            // NotificationContentView.shouldShowBubbleButton().
+            if (notificationIcon != null) {
+                try {
+                    builder.getClass().getMethod("setIcon", android.graphics.drawable.Icon.class)
+                            .invoke(builder, notificationIcon);
+                    iconSet = true;
+                } catch (Throwable t) {
+                    Log.w(TAG, "setIcon(Icon) failed: " + t.getMessage());
+                }
+            }
+            // Some ROMs return only a resource id from their Notification implementation.
+            // Recreate a package-qualified Icon so the resource is resolved in the app's
+            // namespace instead of SystemUI's namespace.
+            if (!iconSet && iconResId != 0 && pkg != null) {
+                try {
+                    android.graphics.drawable.Icon icon =
+                            android.graphics.drawable.Icon.createWithResource(pkg, iconResId);
+                    builder.getClass().getMethod("setIcon", android.graphics.drawable.Icon.class)
+                            .invoke(builder, icon);
+                    iconSet = true;
+                } catch (Throwable t) {
+                    Log.w(TAG, "setIcon(resource Icon) failed: " + t.getMessage());
+                }
+            }
+            // Evolution's older framework accepted an integer resource id. Keep this only as
+            // a compatibility fallback; never use it as the primary Lunaris path.
+            if (!iconSet && iconResId != 0) {
+                try {
+                    builder.getClass().getMethod("setIcon", int.class).invoke(builder, iconResId);
+                    iconSet = true;
+                } catch (Throwable ignored) {}
+            }
+            if (!iconSet && pkg != null) {
+                try {
+                    builder.getClass().getMethod("setShortcutId", String.class).invoke(builder, pkg);
+                    iconSet = true;
+                } catch (Throwable t) {
+                    Log.w(TAG, "setIcon/shortcut set failed: " + t.getMessage());
+                }
+            }
+            if (!iconSet) {
+                Log.w(TAG, "Bubble metadata has no usable Icon for notification");
                 return;
             }
             Notification.BubbleMetadata metadata = builder.build();
@@ -2634,10 +2760,37 @@ public class MoreBubbleHookModule extends XposedModule {
     private static android.graphics.drawable.Drawable getFreeformActionIcon(
             Context ctx, android.content.res.Resources hostResources, String hostPackage) {
         try {
+            // Lunaris exposes the same icon used by its freeform caption/menu in
+            // SystemUI. Reusing the host resource keeps the notification and
+            // freeform window controls visually consistent with the ROM.
+            if (LUNARIS_SYSTEMUI_PACKAGE.equals(hostPackage)) {
+                int iconId = hostResources.getIdentifier(
+                        LUNARIS_FREEFORM_ICON, "drawable", hostPackage);
+                if (iconId != 0) {
+                    android.graphics.drawable.Drawable icon = hostResources
+                            .getDrawable(iconId, ctx.getTheme()).mutate();
+                    tintFreeformIcon(icon, ctx, hostResources, hostPackage);
+                    Log.i(TAG, "Using Lunaris native Freeform icon");
+                    return icon;
+                }
+            }
+
             Context moduleContext = ctx.createPackageContext(
                     "com.floatwindow.morebubblebutton", Context.CONTEXT_IGNORE_SECURITY);
             android.graphics.drawable.Drawable icon = moduleContext.getResources().getDrawable(
                     R.drawable.ic_freeform_button, moduleContext.getTheme()).mutate();
+            tintFreeformIcon(icon, ctx, hostResources, hostPackage);
+            return icon;
+        } catch (Throwable t) {
+            Log.w(TAG, "Freeform icon load failed: " + t.getMessage());
+            return null;
+        }
+    }
+
+    private static void tintFreeformIcon(android.graphics.drawable.Drawable icon, Context ctx,
+            android.content.res.Resources hostResources, String hostPackage) {
+        if (icon == null) return;
+        try {
             try {
                 int tintId = hostResources.getIdentifier(
                         "materialColorOnSurface", "color", hostPackage);
@@ -2645,10 +2798,8 @@ public class MoreBubbleHookModule extends XposedModule {
             } catch (Throwable tintError) {
                 Log.w(TAG, "Freeform icon tint failed: " + tintError.getMessage());
             }
-            return icon;
         } catch (Throwable t) {
-            Log.w(TAG, "Freeform icon load failed: " + t.getMessage());
-            return null;
+            Log.w(TAG, "Freeform icon tint setup failed: " + t.getMessage());
         }
     }
 
