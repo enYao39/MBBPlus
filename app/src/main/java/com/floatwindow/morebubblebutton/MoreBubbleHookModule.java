@@ -664,11 +664,7 @@ public class MoreBubbleHookModule extends XposedModule {
             postHeadsUpRowSync(row);
             return;
         }
-        ViewGroup host = getHeadsUpHandleHost(row);
-        if (host == null) {
-            removeSwipeHandle(row);
-            return;
-        }
+        ViewGroup host = rowView;
         trackHeadsUpRow(row);
         Context ctx = host.getContext();
         try {
@@ -684,17 +680,21 @@ public class MoreBubbleHookModule extends XposedModule {
                 return;
             }
 
-            java.util.List<View> handles = new java.util.ArrayList<>();
-            findHandlesInTree(rowView, handles);
-            
             View handle = null;
-            for (View h : handles) {
-                if (handle == null && h.getParent() == host) {
-                    handle = h;
-                } else if (h.getParent() instanceof ViewGroup) {
-                    ((ViewGroup) h.getParent()).removeView(h);
+            View found = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
+            while (found != null) {
+                if (handle == null && found.getParent() == host) {
+                    handle = found; // keep the first valid one
+                } else {
+                    if (found.getParent() instanceof ViewGroup) {
+                        ((ViewGroup) found.getParent()).removeView(found);
+                    } else {
+                        break; // prevent infinite loop if orphaned
+                    }
                 }
+                found = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
             }
+
             if (handle == null) {
                 SwipeHandleView newHandle = new SwipeHandleView(ctx);
                 newHandle.setTag(HEADS_UP_HANDLE_TAG);
@@ -772,15 +772,7 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    private static ViewGroup getHeadsUpHandleHost(Object row) {
-        Object privateLayout = getFieldSystemUi(row, "mPrivateLayout");
-        if (privateLayout != null) {
-            Object headsUpChild = getFieldSystemUi(privateLayout, "mHeadsUpChild");
-            if (headsUpChild instanceof ViewGroup) return (ViewGroup) headsUpChild;
-            if (privateLayout instanceof ViewGroup) return (ViewGroup) privateLayout;
-        }
-        return row instanceof ViewGroup ? (ViewGroup) row : null;
-    }
+
 
     private static boolean isRowExpandedOrSwiping(Object row) {
         Object value = invokeSystemUi(row, "isUserSwipingToExpandRow");
@@ -937,27 +929,17 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    private static void findHandlesInTree(View root, java.util.List<View> result) {
-        if (root == null) return;
-        if (HEADS_UP_HANDLE_TAG.equals(root.getTag())) {
-            result.add(root);
-        }
-        if (root instanceof ViewGroup) {
-            ViewGroup vg = (ViewGroup) root;
-            for (int i = 0; i < vg.getChildCount(); i++) {
-                findHandlesInTree(vg.getChildAt(i), result);
-            }
-        }
-    }
-
     private static void removeSwipeHandle(Object row) {
-        if (!(row instanceof View)) return;
-        java.util.List<View> handles = new java.util.ArrayList<>();
-        findHandlesInTree((View) row, handles);
-        for (View handle : handles) {
+        if (!(row instanceof ViewGroup)) return;
+        ViewGroup rowView = (ViewGroup) row;
+        View handle = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
+        while (handle != null) {
             if (handle.getParent() instanceof ViewGroup) {
                 ((ViewGroup) handle.getParent()).removeView(handle);
+            } else {
+                break;
             }
+            handle = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
         }
     }
 
