@@ -13,7 +13,7 @@ configurations.configureEach {
 android {
     namespace = "com.floatwindow.morebubblebutton"
     compileSdk = 37
-    buildToolsVersion = "36.0.0"
+    buildToolsVersion = "36.1.0"
 
     defaultConfig {
         applicationId = "com.floatwindow.morebubblebutton"
