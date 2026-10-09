@@ -84,45 +84,61 @@ public class MoreBubbleHookModule extends XposedModule {
         Log.i(TAG, "Hooking SystemUI...");
         // 1. shouldShowBubbleButton: 让所有非前台通知显示气泡按钮。
         //    横条模式与原生按钮互斥，所以这里必须强制隐藏原生按钮。
+        Class<?> contentViewClass = null;
         try {
-            Class<?> clazz = cl.loadClass(
+            contentViewClass = cl.loadClass(
                     "com.android.systemui.statusbar.notification.row.NotificationContentView");
-            hook(clazz.getMethod("shouldShowBubbleButton")).intercept(chain -> {
-                try {
-                    Context ctx = null;
-                    try { ctx = ((View) chain.getThisObject()).getContext(); } catch (Throwable ignored) {}
-                    if (ctx != null && !ModuleSettings.isSystemUiBubbleEnabled(ctx)) return chain.proceed();
-                    if (ctx != null && ModuleSettings.getPopupPresentation(ctx)
-                            == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE
-                            && isHeadsUpContentView(chain.getThisObject())) return false;
-                } catch (Throwable ignored) {}
-                boolean original = (boolean) chain.proceed();
-                if (original) return true;
-                try {
-                    Object contentView = chain.getThisObject();
-                    Object row = getFieldSystemUi(contentView, "mContainingNotification");
-                    if (row == null) return true;
-                    Object adapter = getFieldSystemUi(row, "mEntryAdapter");
-                    if (adapter == null) return true;
-                    Object sbn = invokeSystemUi(adapter, "getSbn");
-                    if (sbn == null) return true;
-                    Notification notif = (Notification) invokeSystemUi(sbn, "getNotification");
-                    if (notif == null) return true;
-                    if ((notif.flags & 0x40) != 0) return false;
-                    String pkg = (String) sbn.getClass().getMethod("getPackageName").invoke(sbn);
-                    Context viewCtx = ((View) contentView).getContext();
-                    if (pkg == null || viewCtx.getPackageManager().getLaunchIntentForPackage(pkg) == null) return false;
-                    return true;
-                } catch (Throwable t) { return true; }
-            });
-            Log.i(TAG, "Hooked shouldShowBubbleButton OK");
-
-            // applyBubbleAction() is the common SystemUI path that paints the
-            // native Bubble icon in both the shade row and the Heads-up card.
-            // Keep the original listener (NotificationEntryAdapter) intact and
-            // only replace the visual affordance when Freeform is selected.
+        } catch (Throwable t) {
+            Log.e(TAG, "Load NotificationContentView: " + t.getMessage());
+        }
+        if (contentViewClass != null) {
             try {
-                Method applyBubbleAction = clazz.getMethod("applyBubbleAction", View.class);
+                Method shouldShowBubbleButton = findMethodSystemUi(
+                        contentViewClass, "shouldShowBubbleButton");
+                if (shouldShowBubbleButton == null) {
+                    throw new NoSuchMethodException("shouldShowBubbleButton");
+                }
+                hook(shouldShowBubbleButton).intercept(chain -> {
+                    try {
+                        Context ctx = null;
+                        try { ctx = ((View) chain.getThisObject()).getContext(); } catch (Throwable ignored) {}
+                        if (ctx != null && !ModuleSettings.isSystemUiBubbleEnabled(ctx)) return chain.proceed();
+                        if (ctx != null && ModuleSettings.getPopupPresentation(ctx)
+                                == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE
+                                && isHeadsUpContentView(chain.getThisObject())) return false;
+                    } catch (Throwable ignored) {}
+                    boolean original = (boolean) chain.proceed();
+                    if (original) return true;
+                    try {
+                        Object contentView = chain.getThisObject();
+                        Object row = getFieldSystemUi(contentView, "mContainingNotification");
+                        if (row == null) return true;
+                        Object adapter = getFieldSystemUi(row, "mEntryAdapter");
+                        if (adapter == null) return true;
+                        Object sbn = invokeSystemUi(adapter, "getSbn");
+                        if (sbn == null) return true;
+                        Notification notif = (Notification) invokeSystemUi(sbn, "getNotification");
+                        if (notif == null) return true;
+                        if ((notif.flags & 0x40) != 0) return false;
+                        String pkg = (String) sbn.getClass().getMethod("getPackageName").invoke(sbn);
+                        Context viewCtx = ((View) contentView).getContext();
+                        if (pkg == null || viewCtx.getPackageManager().getLaunchIntentForPackage(pkg) == null) return false;
+                        return true;
+                    } catch (Throwable t) { return true; }
+                });
+                Log.i(TAG, "Hooked shouldShowBubbleButton OK");
+            } catch (Throwable t) {
+                Log.e(TAG, "Hook shouldShowBubbleButton: " + t.getMessage());
+            }
+
+            try {
+                // applyBubbleAction() is the common SystemUI path that paints the
+                // native Bubble icon in both the shade row and the Heads-up card.
+                // Keep the original listener (NotificationEntryAdapter) intact and
+                // only replace the visual affordance when Freeform is selected.
+                Method applyBubbleAction = findMethodSystemUi(
+                        contentViewClass, "applyBubbleAction", View.class);
+                if (applyBubbleAction == null) throw new NoSuchMethodException("applyBubbleAction");
                 hook(applyBubbleAction).intercept(chain -> {
                     Object result = chain.proceed();
                     try {
@@ -143,78 +159,65 @@ public class MoreBubbleHookModule extends XposedModule {
                 Log.w(TAG, "Hook applyBubbleAction: " + t.getMessage());
             }
 
-            // Evolution17 仍使用 legacy NotificationContentView 作为 Heads-up 卡片容器。
-            // setHeadsUpChild() 负责替换 Heads-up 内容，selectLayout() 负责切换显示状态；
-            // 两处都刷新横条，避免内容重绑或 Heads-up 收起后残留。
-            Method setHeadsUpChild = clazz.getMethod("setHeadsUpChild", View.class);
-            hook(setHeadsUpChild).intercept(chain -> {
-                Object result = chain.proceed();
-                updateHeadsUpSwipeHandle(chain.getThisObject());
-                return result;
-            });
-            try {
-                Method setContractedChild = clazz.getMethod("setContractedChild", View.class);
-                hook(setContractedChild).intercept(chain -> {
-                    Object result = chain.proceed();
-                    updateHeadsUpSwipeHandle(chain.getThisObject());
-                    return result;
-                });
-                Log.i(TAG, "Hooked NotificationContentView.setContractedChild OK");
-            } catch (Throwable t) {
-                Log.w(TAG, "Hook setContractedChild: " + t.getMessage());
-            }
-            Method selectLayout = clazz.getMethod("selectLayout", boolean.class, boolean.class);
-            hook(selectLayout).intercept(chain -> {
-                Object result = chain.proceed();
-                updateHeadsUpSwipeHandle(chain.getThisObject());
-                return result;
-            });
-            Method attached = clazz.getMethod("onAttachedToWindow");
-            hook(attached).intercept(chain -> {
-                Object result = chain.proceed();
-                updateHeadsUpSwipeHandle(chain.getThisObject());
-                return result;
-            });
-            Method onLayout = clazz.getMethod("onLayout", boolean.class,
-                    int.class, int.class, int.class, int.class);
-            hook(onLayout).intercept(chain -> {
-                Object result = chain.proceed();
-                updateHeadsUpSwipeHandle(chain.getThisObject());
-                return result;
-            });
-            Log.i(TAG, "Hooked Heads-up swipe handle lifecycle OK");
-        } catch (Throwable t) { Log.e(TAG, "Hook shouldShowBubbleButton: " + t.getMessage()); }
+            hookNotificationContentLifecycle(contentViewClass);
+        }
+
+        // The row owns the actual Heads-up state. This is the reliable first-frame
+        // entry point on Evolution17; NotificationContentView is often rebound before
+        // the row enters Heads-up mode.
+        hookHeadsUpRowLifecycle(cl);
 
         // 2. injectBubbleMetadata at bind time
         try {
             Class<?> binderClass = cl.loadClass(
                     "com.android.systemui.statusbar.notification.collection.inflation.NotificationRowBinderImpl");
             java.lang.reflect.Method target = null;
+            java.lang.reflect.Method fallback = null;
             for (java.lang.reflect.Method m : binderClass.getDeclaredMethods()) {
-                if (m.getParameterCount() >= 3 && m.getParameterTypes()[2].getName().contains("ExpandableNotificationRow")) {
+                boolean hasRow = false;
+                boolean hasEntry = false;
+                for (Class<?> parameterType : m.getParameterTypes()) {
+                    if (parameterType.getName().contains("ExpandableNotificationRow")) {
+                        hasRow = true;
+                    }
+                    if (parameterType.getName().contains("NotificationEntry")) {
+                        hasEntry = true;
+                    }
+                }
+                if (hasRow && hasEntry && m.getName().toLowerCase(Locale.ROOT).contains("inflate")) {
                     target = m;
                     break;
                 }
+                if (hasRow && hasEntry && fallback == null) fallback = m;
             }
+            if (target == null) target = fallback;
             if (target != null) {
+                final int parameterCount = target.getParameterCount();
                 hook(target).intercept(chain -> {
+                    Object row = null;
+                    Object entry = null;
+                    for (int i = 0; i < parameterCount; i++) {
+                        Object argument = chain.getArg(i);
+                        if (argument == null) continue;
+                        String name = argument.getClass().getName();
+                        if (name.contains("ExpandableNotificationRow")) row = argument;
+                        if (name.contains("NotificationEntry")) entry = argument;
+                    }
+                    if (entry == null) entry = getNotificationEntryFromRow(row);
+                    // Metadata must exist before inflation/rebind starts. Otherwise the
+                    // first Heads-up row can bind without a Bubble action and only a later
+                    // notification update will refresh it.
+                    prepareBubbleMetadata(entry);
                     Object result = chain.proceed();
-                    try {
-                        Object row = chain.getArg(2);
-                        if (row == null) return result;
-                        Object entry = getFieldSystemUi(row, "mEntry");
-                        if (entry == null) return result;
-                        Object sbn = getFieldSystemUi(entry, "mSbn");
-                        if (sbn == null) return result;
-                        Notification notif = (Notification) invokeSystemUi(sbn, "getNotification");
-                        if (notif == null) return result;
-                        if ((notif.flags & 0x40) != 0) return result;
-                        if (notif.contentIntent == null) return result;
-                        injectBubbleMetadata(entry, notif);
-                    } catch (Throwable t) { Log.w(TAG, "bindRow meta inject: " + t.getMessage()); }
+                    if (row != null) {
+                        refreshBubbleButton(row);
+                        postHeadsUpRowSync(row);
+                    }
                     return result;
                 });
                 Log.i(TAG, "Hooked NotificationRowBinderImpl OK");
+            } else {
+                Log.w(TAG, "NotificationRowBinderImpl row bind method not found");
             }
         } catch (Throwable t) { Log.e(TAG, "Hook RowBinder: " + t.getMessage()); }
 
@@ -417,46 +420,148 @@ public class MoreBubbleHookModule extends XposedModule {
         imageView.setContentDescription(getFreeformLabel(ctx));
     }
 
+    private void hookNotificationContentLifecycle(Class<?> contentViewClass) {
+        hookContentMethod(contentViewClass, "setHeadsUpChild");
+        hookContentMethod(contentViewClass, "setContractedChild");
+        hookContentMethod(contentViewClass, "selectLayout");
+        hookContentMethod(contentViewClass, "onAttachedToWindow");
+        hookContentMethod(contentViewClass, "onLayout");
+        hookContentMethod(contentViewClass, "onNotificationUpdated");
+        hookContentMethod(contentViewClass, "setBubbleClickListener");
+    }
+
+    private void hookContentMethod(Class<?> targetClass, String name) {
+        Set<String> hooked = new HashSet<>();
+        for (Class<?> type = targetClass; type != null; type = type.getSuperclass()) {
+            for (Method method : type.getDeclaredMethods()) {
+                if (!name.equals(method.getName())
+                        || !method.getDeclaringClass().getName().startsWith("com.android.systemui.")) {
+                    continue;
+                }
+                String signature = method.toGenericString();
+                if (!hooked.add(signature)) continue;
+                try {
+                    method.setAccessible(true);
+                    hook(method).intercept(chain -> {
+                        Object result = chain.proceed();
+                        Object contentView = chain.getThisObject();
+                        updateHeadsUpSwipeHandle(contentView);
+                        if ("onNotificationUpdated".equals(name)
+                                || "setBubbleClickListener".equals(name)) {
+                            refreshBubbleButton(getFieldSystemUi(
+                                    contentView, "mContainingNotification"));
+                        }
+                        return result;
+                    });
+                    Log.i(TAG, "Hooked NotificationContentView." + name
+                            + " " + method.getParameterCount() + " args");
+                } catch (Throwable t) {
+                    Log.w(TAG, "Hook NotificationContentView." + name + ": "
+                            + t.getMessage());
+                }
+            }
+        }
+    }
+
+    private void hookHeadsUpRowLifecycle(ClassLoader cl) {
+        try {
+            Class<?> rowClass = cl.loadClass(
+                    "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow");
+            hookRowMethods(rowClass, "setHeadsUp", false);
+            hookRowMethods(rowClass, "setActualHeight", false);
+            hookRowMethods(rowClass, "onLayout", false);
+            hookRowMethods(rowClass, "onAttachedToWindow", false);
+            hookRowMethods(rowClass, "onDetachedFromWindow", false);
+            hookRowMethods(rowClass, "onNotificationUpdated", true);
+            hookRowMethods(rowClass, "setBubbleClickListener", true);
+            Log.i(TAG, "Hooked ExpandableNotificationRow Heads-up lifecycle OK");
+        } catch (Throwable t) {
+            Log.e(TAG, "Hook ExpandableNotificationRow lifecycle: " + t.getMessage());
+        }
+    }
+
+    private void hookRowMethods(Class<?> targetClass, String name, boolean refreshBubble) {
+        Set<String> hooked = new HashSet<>();
+        for (Class<?> type = targetClass; type != null; type = type.getSuperclass()) {
+            String typeName = type.getName();
+            if ("android.view.View".equals(typeName)
+                    || "android.view.ViewGroup".equals(typeName)
+                    || "java.lang.Object".equals(typeName)) {
+                break;
+            }
+            for (Method method : type.getDeclaredMethods()) {
+                if (!name.equals(method.getName())
+                        || !method.getDeclaringClass().getName().startsWith("com.android.systemui.")) {
+                    continue;
+                }
+                String signature = method.toGenericString();
+                if (!hooked.add(signature)) continue;
+                try {
+                    method.setAccessible(true);
+                    hook(method).intercept(chain -> {
+                        Object result = chain.proceed();
+                        Object row = chain.getThisObject();
+                        if ("onDetachedFromWindow".equals(name)) {
+                            removeSwipeHandle(row);
+                            return result;
+                        }
+                        if (refreshBubble) {
+                            prepareBubbleMetadata(getNotificationEntryFromRow(row));
+                            refreshBubbleButton(row);
+                        }
+                        postHeadsUpRowSync(row);
+                        return result;
+                    });
+                    Log.i(TAG, "Hooked ExpandableNotificationRow." + name
+                            + " " + method.getParameterCount() + " args");
+                } catch (Throwable t) {
+                    Log.w(TAG, "Hook ExpandableNotificationRow." + name + ": "
+                            + t.getMessage());
+                }
+            }
+        }
+    }
+
     /**
      * Adds the small bottom-center handle only to a real Heads-up popup row.
      * Evolution17 leaves NotificationContentView.mHeadsUpChild empty, so the row is the
      * stable host and the strict row state keeps the handle out of the notification shade.
      */
     private static void updateHeadsUpSwipeHandle(Object contentViewObject) {
-        if (!(contentViewObject instanceof ViewGroup)) return;
-        ViewGroup contentView = (ViewGroup) contentViewObject;
+        Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
+        if (row != null) {
+            postHeadsUpRowSync(row);
+        }
+    }
+
+    private static void postHeadsUpRowSync(Object row) {
+        if (!(row instanceof View)) return;
+        View rowView = (View) row;
+        rowView.post(() -> syncHeadsUpSwipeHandle(row));
+    }
+
+    private static void syncHeadsUpSwipeHandle(Object row) {
+        if (!(row instanceof ViewGroup)) return;
+        ViewGroup host = (ViewGroup) row;
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            contentView.post(() -> updateHeadsUpSwipeHandle(contentView));
+            host.post(() -> syncHeadsUpSwipeHandle(row));
             return;
         }
-        Context ctx = contentView.getContext();
+        Context ctx = host.getContext();
         try {
             boolean enabled = ModuleSettings.isSystemUiBubbleEnabled(ctx)
                     && ModuleSettings.getPopupPresentation(ctx)
                     == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE;
-            Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
             Notification notification = getNotificationFromContentView(row);
-            boolean isHeadsUp = isHeadsUpContentView(contentViewObject);
             boolean validNotification = notification != null
                     && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
                     && notification.contentIntent != null;
-            // Evolution17 keeps mHeadsUpChild null and renders the Heads-up content through
-            // the row's entry adapter. Do not use that legacy child as a visibility gate.
-            if (!enabled || !isHeadsUp || !validNotification) {
-                View staleHandle = contentView.findViewWithTag(HEADS_UP_HANDLE_TAG);
-                if (staleHandle == null && row instanceof ViewGroup) {
-                    staleHandle = ((ViewGroup) row).findViewWithTag(HEADS_UP_HANDLE_TAG);
-                }
-                if (staleHandle != null) staleHandle.setVisibility(View.GONE);
+            if (!enabled || !isHeadsUpRow(row) || !validNotification) {
+                removeSwipeHandle(row);
                 return;
             }
 
-            // The row is the actual Heads-up popup container on Evolution17. Attaching to
-            // NotificationContentView makes the handle either clipped or unreachable because
-            // mHeadsUpChild is not populated on this build.
-            ViewGroup host = row instanceof ViewGroup ? (ViewGroup) row : contentView;
             View handle = host.findViewWithTag(HEADS_UP_HANDLE_TAG);
-            if (handle == null) handle = contentView.findViewWithTag(HEADS_UP_HANDLE_TAG);
             if (handle != null && handle.getParent() != host) {
                 if (handle.getParent() instanceof ViewGroup) {
                     ((ViewGroup) handle.getParent()).removeView(handle);
@@ -469,36 +574,39 @@ public class MoreBubbleHookModule extends XposedModule {
                 newHandle.setContentDescription(getConfiguredOpenLabel(ctx));
                 newHandle.setOnTouchListener(new View.OnTouchListener() {
                     private float downY;
-                    private boolean opened;
+                    private boolean passedThreshold;
 
                     @Override
                     public boolean onTouch(View v, MotionEvent event) {
                         switch (event.getActionMasked()) {
                             case MotionEvent.ACTION_DOWN:
-                                // The shade's parent normally interprets a downward gesture as
-                                // notification-panel expansion. Claim the gesture before the
-                                // first MOVE so the handle receives the complete swipe.
                                 requestDisallowParentIntercept(v, true);
                                 downY = event.getY();
-                                opened = false;
+                                passedThreshold = false;
+                                v.setAlpha(1f);
                                 return true;
                             case MotionEvent.ACTION_MOVE:
                                 requestDisallowParentIntercept(v, true);
-                                if (!opened && event.getY() - downY >= swipeDistance(v.getContext())) {
-                                    opened = true;
-                                    openNotificationFromHeadsUp(v);
+                                if (event.getY() - downY >= swipeDistance(v.getContext())) {
+                                    passedThreshold = true;
+                                    v.setAlpha(0.72f);
                                 }
                                 return true;
                             case MotionEvent.ACTION_UP:
-                                if (!opened && event.getY() - downY >= swipeDistance(v.getContext())) {
-                                    opened = true;
-                                    openNotificationFromHeadsUp(v);
-                                }
-                                v.performClick();
                                 requestDisallowParentIntercept(v, false);
+                                boolean shouldOpen = passedThreshold
+                                        || event.getY() - downY >= swipeDistance(v.getContext());
+                                passedThreshold = false;
+                                if (shouldOpen) {
+                                    boolean launched = openNotificationFromHeadsUp(v);
+                                    if (!launched) v.setAlpha(1f);
+                                } else {
+                                    v.performClick();
+                                }
                                 return true;
                             case MotionEvent.ACTION_CANCEL:
-                                opened = false;
+                                passedThreshold = false;
+                                v.setAlpha(1f);
                                 requestDisallowParentIntercept(v, false);
                                 return true;
                             default:
@@ -508,31 +616,74 @@ public class MoreBubbleHookModule extends XposedModule {
                 });
                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                         dp(ctx, ModuleSettings.getSwipeHandleLength(ctx) + 24),
-                        dp(ctx, 30), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-                lp.bottomMargin = dp(ctx, 3);
+                        dp(ctx, 30), Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+                lp.topMargin = 0;
                 host.addView(newHandle, lp);
                 handle = newHandle;
                 Log.i(TAG, "Heads-up swipe handle attached to "
                         + host.getClass().getSimpleName());
             }
-            host.setClipChildren(false);
-            host.setClipToPadding(false);
+            positionSwipeHandle(host, handle, ctx);
             handle.bringToFront();
             handle.setAlpha(1f);
             handle.setContentDescription(getConfiguredOpenLabel(ctx));
-            ViewGroup.LayoutParams layoutParams = handle.getLayoutParams();
-            if (layoutParams != null) {
-                int desiredWidth = dp(ctx, ModuleSettings.getSwipeHandleLength(ctx) + 24);
-                if (layoutParams.width != desiredWidth || layoutParams.height != dp(ctx, 30)) {
-                    layoutParams.width = desiredWidth;
-                    layoutParams.height = dp(ctx, 30);
-                    handle.setLayoutParams(layoutParams);
-                }
-            }
             handle.invalidate();
             handle.setVisibility(View.VISIBLE);
         } catch (Throwable t) {
-            Log.w(TAG, "update Heads-up handle: " + t.getMessage());
+            Log.w(TAG, "sync Heads-up handle: " + t.getMessage());
+        }
+    }
+
+    private static boolean isHeadsUpRow(Object row) {
+        Object value = invokeSystemUi(row, "isHeadsUpState");
+        if (value instanceof Boolean) return Boolean.TRUE.equals(value);
+        value = getFieldSystemUi(row, "mIsHeadsUp");
+        return Boolean.TRUE.equals(value);
+    }
+
+    private static void positionSwipeHandle(ViewGroup host, View handle, Context ctx) {
+        int handleHeight = dp(ctx, 30);
+        int bottomMargin = dp(ctx, 3);
+        int actualHeight = 0;
+        Object value = invokeSystemUi(host, "getActualHeight");
+        if (value instanceof Number) actualHeight = ((Number) value).intValue();
+        if (actualHeight <= 0) actualHeight = host.getHeight();
+        if (actualHeight <= 0) actualHeight = host.getMeasuredHeight();
+        int topMargin = Math.max(0, actualHeight - handleHeight - bottomMargin);
+        int width = dp(ctx, ModuleSettings.getSwipeHandleLength(ctx) + 24);
+        if (host instanceof FrameLayout) {
+            FrameLayout.LayoutParams lp = handle.getLayoutParams() instanceof FrameLayout.LayoutParams
+                    ? (FrameLayout.LayoutParams) handle.getLayoutParams()
+                    : new FrameLayout.LayoutParams(width, handleHeight);
+            boolean changed = lp.width != width || lp.height != handleHeight
+                    || lp.gravity != (Gravity.TOP | Gravity.CENTER_HORIZONTAL)
+                    || lp.topMargin != topMargin || lp.bottomMargin != 0;
+            lp.width = width;
+            lp.height = handleHeight;
+            lp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+            lp.topMargin = topMargin;
+            lp.bottomMargin = 0;
+            if (changed) handle.setLayoutParams(lp);
+        } else {
+            ViewGroup.LayoutParams raw = handle.getLayoutParams();
+            ViewGroup.MarginLayoutParams lp = raw instanceof ViewGroup.MarginLayoutParams
+                    ? (ViewGroup.MarginLayoutParams) raw
+                    : new ViewGroup.MarginLayoutParams(width, handleHeight);
+            boolean changed = lp.width != width || lp.height != handleHeight
+                    || lp.topMargin != topMargin;
+            lp.width = width;
+            lp.height = handleHeight;
+            lp.topMargin = topMargin;
+            if (changed) handle.setLayoutParams(lp);
+            handle.setX(Math.max(0, (host.getWidth() - width) / 2f));
+        }
+    }
+
+    private static void removeSwipeHandle(Object row) {
+        if (!(row instanceof ViewGroup)) return;
+        View handle = ((ViewGroup) row).findViewWithTag(HEADS_UP_HANDLE_TAG);
+        if (handle != null && handle.getParent() instanceof ViewGroup) {
+            ((ViewGroup) handle.getParent()).removeView(handle);
         }
     }
 
@@ -609,23 +760,29 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static void requestDisallowParentIntercept(View view, boolean disallow) {
         try {
-            if (view.getParent() != null) {
-                view.getParent().requestDisallowInterceptTouchEvent(disallow);
+            android.view.ViewParent parent = view.getParent();
+            while (parent != null) {
+                parent.requestDisallowInterceptTouchEvent(disallow);
+                parent = parent.getParent();
             }
         } catch (Throwable ignored) {}
     }
 
-    private static void openNotificationFromHeadsUp(View handle) {
+    private static boolean openNotificationFromHeadsUp(View handle) {
         try {
             Object row = getHeadsUpRowFromHandle(handle);
-            dismissHeadsUpPopup(row);
-            openNotificationForRow(handle.getContext(), row, "Heads-up swipe");
+            boolean launched = openNotificationForRow(handle.getContext(), row, "Heads-up swipe");
+            if (launched) {
+                removeHeadsUpPopupAfterOpen(row);
+            }
+            return launched;
         } catch (Throwable t) {
             Log.w(TAG, "Heads-up swipe open: " + t.getMessage());
+            return false;
         }
     }
 
-    private static void dismissHeadsUpPopup(Object row) {
+    private static void removeHeadsUpPopupAfterOpen(Object row) {
         if (row == null) return;
         try {
             Object sbn = getNotificationSbnFromRow(row);
@@ -634,20 +791,12 @@ public class MoreBubbleHookModule extends XposedModule {
             String key = (String) keyValue;
             Object manager = getHeadsUpManager(row);
             if (manager != null && removeHeadsUpEntry(manager, key)) {
-                Log.i(TAG, "Removed Heads-up popup before opening " + key);
+                Log.i(TAG, "Removed Heads-up popup after opening " + key);
                 return;
             }
-
-            // Some Evolution builds expose the row visibility callback even when the
-            // HeadsUpManager is not registered in Dependency yet.
-            Method setVisible = findMethodSystemUi(row.getClass(),
-                    "setHeadsUpIsVisible", boolean.class);
-            if (setVisible != null) {
-                setVisible.invoke(row, false);
-                Log.i(TAG, "Hidden Heads-up row before opening " + key);
-            }
+            Log.w(TAG, "Heads-up manager unavailable; leaving popup lifecycle to SystemUI");
         } catch (Throwable t) {
-            Log.w(TAG, "Dismiss Heads-up popup failed: " + t.getMessage());
+            Log.w(TAG, "Remove Heads-up popup failed: " + t.getMessage());
         }
     }
 
@@ -695,10 +844,13 @@ public class MoreBubbleHookModule extends XposedModule {
             Class<?>[] types = fallback.getParameterTypes();
             Object[] args = new Object[types.length];
             args[0] = key;
+            int booleanIndex = 0;
             for (int i = 1; i < types.length; i++) {
                 if (types[i] == boolean.class || types[i] == Boolean.class) {
-                    // releaseImmediately=true and animate=true both remove the visible HUN now.
-                    args[i] = true;
+                    // The first boolean is releaseImmediately. Keep it false so SystemUI
+                    // can run its normal removal animation; an optional second boolean is
+                    // the explicit animate flag.
+                    args[i] = booleanIndex++ == 0 ? false : true;
                 } else if (types[i] == String.class) {
                     args[i] = "MoreBubbleButton swipe";
                 } else {
@@ -1753,6 +1905,43 @@ public class MoreBubbleHookModule extends XposedModule {
             return false;
         }
         return true;
+    }
+
+    private static void prepareBubbleMetadata(Object entry) {
+        if (entry == null) return;
+        try {
+            Object sbn = getFieldSystemUi(entry, "mSbn");
+            Notification notif = sbn != null
+                    ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
+            if (notif == null
+                    || (notif.flags & Notification.FLAG_ONGOING_EVENT) != 0
+                    || notif.contentIntent == null) {
+                return;
+            }
+            injectBubbleMetadata(entry, notif);
+        } catch (Throwable t) {
+            Log.w(TAG, "prepareBubbleMetadata: " + t.getMessage());
+        }
+    }
+
+    private static void refreshBubbleButton(Object row) {
+        if (row == null) return;
+        try {
+            Method update = findMethodSystemUi(row.getClass(), "updateBubbleButton");
+            if (update != null && update.getParameterCount() == 0) {
+                update.invoke(row);
+                return;
+            }
+            Object contentView = getFieldSystemUi(row, "mPrivateLayout");
+            if (contentView == null) contentView = getFieldSystemUi(row, "mNotificationContentView");
+            update = contentView != null
+                    ? findMethodSystemUi(contentView.getClass(), "updateBubbleButton") : null;
+            if (update != null && update.getParameterCount() == 0) {
+                update.invoke(contentView);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "refreshBubbleButton: " + t.getMessage());
+        }
     }
 
     private static void injectBubbleMetadata(Object entry, Notification notif) {
