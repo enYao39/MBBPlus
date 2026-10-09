@@ -15,6 +15,7 @@ import android.net.Uri;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Parcel;
+import android.os.SystemClock;
 import android.os.UserHandle;
 import android.util.Log;
 import android.view.Gravity;
@@ -48,6 +49,10 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final int WINDOWING_MODE_FREEFORM = 5;
     private static final int VISIBLE_TYPE_HEADS_UP = 2;
     private static final long SWIPE_HANDLE_MIN_DISTANCE_DP = 24L;
+    private static final String LMO_FREEFORM_SERVICE = "lmo_freeform";
+    private static final String LMO_FREEFORM_DESCRIPTOR =
+            "com.libremobileos.freeform.ILMOFreeformUIService";
+    private static final int LMO_START_APP_TRANSACTION = 1;
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -458,6 +463,11 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static boolean launchNotificationViaLmoFreeform(Context ctx, Object sbn,
             Notification notification, String reason) {
+        // The LMO service has a dedicated PendingIntent path. Unlike the exported
+        // component-only receiver, it preserves the notification's deep-link,
+        // extras and creator token (for example, a WeChat conversation target).
+        if (launchNotificationViaLmoBinder(ctx, sbn, notification, reason)) return true;
+
         try {
             String packageName = (String) sbn.getClass().getMethod("getPackageName").invoke(sbn);
             Intent targetIntent = getNotificationTargetIntent(notification, packageName);
@@ -489,6 +499,77 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) {
             Log.w(TAG, reason + ": LMO Freeform request failed: " + t.getMessage());
             return false;
+        }
+    }
+
+    private static boolean launchNotificationViaLmoBinder(Context ctx, Object sbn,
+            Notification notification, String reason) {
+        if (notification == null || notification.contentIntent == null) return false;
+
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            IBinder binder = getLmoFreeformBinder();
+            if (binder == null) return false;
+
+            String packageName = null;
+            try {
+                packageName = notification.contentIntent.getCreatorPackage();
+            } catch (Throwable ignored) {}
+            if (packageName == null && sbn != null) {
+                try {
+                    packageName = (String) sbn.getClass().getMethod("getPackageName")
+                            .invoke(sbn);
+                } catch (Throwable ignored) {}
+            }
+            if (packageName == null) return false;
+
+            android.util.DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+            int width = Math.max(1, Math.min(Math.round(dm.widthPixels * 0.7f), 600));
+            int height = Math.max(1, Math.min(Math.round(dm.heightPixels * 0.4f), 600));
+            int densityDpi = Math.max(1, dm.densityDpi);
+
+            data.writeInterfaceToken(LMO_FREEFORM_DESCRIPTOR);
+            data.writeString(packageName);
+            data.writeString("notification-" + SystemClock.uptimeMillis());
+            // LMOFreeformServiceManager.createWindow(PendingIntent, ...) uses -100
+            // to select FreeformWindow's PendingIntent branch.
+            data.writeInt(-100);
+            data.writeInt(-1);
+            data.writeInt(1);
+            notification.contentIntent.writeToParcel(data, 0);
+            data.writeInt(width);
+            data.writeInt(height);
+            data.writeInt(densityDpi);
+
+            if (!binder.transact(LMO_START_APP_TRANSACTION, data, reply, 0)) {
+                Log.w(TAG, reason + ": LMO Binder transaction was rejected");
+                return false;
+            }
+            reply.readException();
+            Log.i(TAG, reason + ": launched notification PendingIntent via LMO Binder for "
+                    + packageName + " (" + width + "x" + height + ", dpi=" + densityDpi + ")");
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": LMO PendingIntent Binder launch failed: "
+                    + t.getMessage());
+            return false;
+        } finally {
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    private static IBinder getLmoFreeformBinder() {
+        try {
+            Class<?> serviceManager = Class.forName("android.os.ServiceManager");
+            Method getService = serviceManager.getDeclaredMethod("getService", String.class);
+            getService.setAccessible(true);
+            Object binder = getService.invoke(null, LMO_FREEFORM_SERVICE);
+            return binder instanceof IBinder ? (IBinder) binder : null;
+        } catch (Throwable t) {
+            Log.w(TAG, "LMO Freeform Binder lookup failed: " + t.getMessage());
+            return null;
         }
     }
 
@@ -526,11 +607,7 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static boolean isLmoFreeformServiceAvailable() {
         try {
-            Class<?> serviceManager = Class.forName("android.os.ServiceManager");
-            Method getService = serviceManager.getDeclaredMethod("getService", String.class);
-            getService.setAccessible(true);
-            Object binder = getService.invoke(null, "lmo_freeform");
-            if (binder != null) {
+            if (getLmoFreeformBinder() != null) {
                 Log.i(TAG, "Freeform supported by lmo_freeform Binder service");
                 return true;
             }
