@@ -155,7 +155,12 @@ public class MoreBubbleHookModule extends XposedModule {
                         // the public/keyguard layout. The module must never expose the extra
                         // launcher there; use the row's own state instead of the coarse global
                         // sOnKeyguard flag because shade and keyguard rows may coexist briefly.
-                        if (isOnKeyguardRow(row) || isOnKeyguardContentView(contentView)) {
+                        // The row is the authoritative owner of the current lock-screen state.
+                        // A ContentView can keep its old mOnKeyguard value for one bind after
+                        // the device is unlocked, so do not let that stale value suppress the
+                        // button when a row is already known to be off keyguard.
+                        if (isOnKeyguardRow(row)
+                                || (row == null && isOnKeyguardContentView(contentView))) {
                             return false;
                         }
 
@@ -491,6 +496,7 @@ public class MoreBubbleHookModule extends XposedModule {
         hookContentMethod(contentViewClass, "setHeadsUpChild");
         hookContentMethod(contentViewClass, "setContractedChild");
         hookContentMethod(contentViewClass, "setHeadsUp");
+        hookContentMethod(contentViewClass, "setOnKeyguard");
         hookContentMethod(contentViewClass, "selectLayout");
         hookContentMethod(contentViewClass, "onAttachedToWindow");
         hookContentMethod(contentViewClass, "onLayout");
@@ -513,8 +519,12 @@ public class MoreBubbleHookModule extends XposedModule {
                     hook(method).intercept(chain -> {
                         Object contentView = chain.getThisObject();
                         Object row = getFieldSystemUi(contentView, "mContainingNotification");
+                        boolean leavingKeyguard = "setOnKeyguard".equals(name)
+                                && method.getParameterCount() > 0
+                                && !Boolean.TRUE.equals(chain.getArg(0));
                         if ("onNotificationUpdated".equals(name)
-                                || "setBubbleClickListener".equals(name)) {
+                                || "setBubbleClickListener".equals(name)
+                                || leavingKeyguard) {
                             // The visibility check can happen during the same bind, before
                             // SystemUI's later callback refreshes the row. Keep metadata ready
                             // for both the shade and the Heads-up layout on first inflation.
@@ -523,7 +533,8 @@ public class MoreBubbleHookModule extends XposedModule {
                         Object result = chain.proceed();
                         updateHeadsUpSwipeHandle(contentView);
                         if ("onNotificationUpdated".equals(name)
-                                || "setBubbleClickListener".equals(name)) {
+                                || "setBubbleClickListener".equals(name)
+                                || leavingKeyguard) {
                             prepareBubbleMetadata(getNotificationEntryFromRow(row));
                             refreshBubbleButton(row);
                         }
@@ -549,7 +560,7 @@ public class MoreBubbleHookModule extends XposedModule {
             hookRowMethods(rowClass, "onDetachedFromWindow", false);
             hookRowMethods(rowClass, "setUserExpanded", false);
             hookRowMethods(rowClass, "setUserSwipingToExpandRow", false);
-            hookRowMethods(rowClass, "setOnKeyguard", false);
+            hookRowMethods(rowClass, "setOnKeyguard", true);
             hookRowMethods(rowClass, "setHeadsUpAnimatingAway", false);
             hookRowMethods(rowClass, "onNotificationUpdated", true);
             hookRowMethods(rowClass, "setBubbleClickListener", true);
@@ -649,6 +660,12 @@ public class MoreBubbleHookModule extends XposedModule {
                                 removeSwipeHandle(row);
                                 return result;
                             }
+                            // Notifications received while the display was off are first
+                            // bound to the keyguard layout. Once the row leaves keyguard,
+                            // explicitly rebuild the Bubble button even if it is not a
+                            // Heads-up row, because the popup-only lifecycle may not run.
+                            prepareBubbleMetadata(getNotificationEntryFromRow(row));
+                            refreshBubbleButton(row);
                         }
                         if (("setUserExpanded".equals(name)
                                 || "setUserSwipingToExpandRow".equals(name)
@@ -658,7 +675,7 @@ public class MoreBubbleHookModule extends XposedModule {
                             removeSwipeHandle(row);
                             return result;
                         }
-                        if (refreshBubble) {
+                        if (refreshBubble && !"setOnKeyguard".equals(name)) {
                             prepareBubbleMetadata(getNotificationEntryFromRow(row));
                             refreshBubbleButton(row);
                         }

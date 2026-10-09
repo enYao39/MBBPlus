@@ -12,7 +12,7 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 1. 先阅读同目录的 `NOTES.md`，再检查模块仓库的 `git status`、最近提交和当前差异。
 2. 只在本模块目录内工作，并遵守上级 `agents.md` 的边界约束。
 3. 修改前确认现有未提交内容是否属于当前任务；不要覆盖用户已有改动。
-4. 对代码改动使用 `apply_patch`，完成一个逻辑阶段后立即创建本地 commit；若用户要求版本更新，使用点号递增小版本并同步 versionCode。
+4. 对代码改动使用 `apply_patch`，完成一个逻辑阶段后立即创建本地 commit；每次创建交付相关 commit 时使用点号递增小版本并同步 versionCode。
 5. 至少执行 `git diff --check` 和与任务匹配的构建；交付 APK 时执行 Release 构建。如果设备可用，再进行安装和短时日志验证。
 6. 最终报告提交号、构建结果、设备验证是否完成，以及仍受设备权限限制的项目。
 

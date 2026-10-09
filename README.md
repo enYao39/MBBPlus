@@ -4,7 +4,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 
 > Evolution 17 是当前主要实机验证基线；Lunaris AOSP 3.12 已针对通知注入路径做过兼容性验证。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
 
-当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.10 (18)`。
+当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.11 (19)`。
 
 ## 功能
 
