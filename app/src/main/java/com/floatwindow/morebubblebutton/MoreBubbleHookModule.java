@@ -483,11 +483,11 @@ public class MoreBubbleHookModule extends XposedModule {
         try {
             Class<?> rowClass = cl.loadClass(
                     "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow");
-            hookRowMethods(rowClass, "setHeadsUp", false);
+            hookRowMethods(rowClass, "setHeadsUp", true);
             hookRowMethods(rowClass, "onLayout", false);
-            hookRowMethods(rowClass, "onAttachedToWindow", false);
+            hookRowMethods(rowClass, "onAttachedToWindow", true);
             hookRowMethods(rowClass, "onDetachedFromWindow", false);
-            hookRowMethods(rowClass, "setUserExpanded", false);
+            hookRowMethods(rowClass, "setUserExpanded", true);
             hookRowMethods(rowClass, "setUserSwipingToExpandRow", false);
             hookRowMethods(rowClass, "setOnKeyguard", false);
             hookRowMethods(rowClass, "setHeadsUpAnimatingAway", false);
