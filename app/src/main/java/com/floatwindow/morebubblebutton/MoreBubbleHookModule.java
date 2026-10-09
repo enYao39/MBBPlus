@@ -434,6 +434,16 @@ public class MoreBubbleHookModule extends XposedModule {
                     && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
                     && notification.contentIntent != null;
 
+            if (enabled || isHeadsUp) {
+                Log.d(TAG, "Swipe handle state: enabled=" + enabled
+                        + " headsUp=" + isHeadsUp
+                        + " row=" + (row != null)
+                        + " child=" + (headsUpChild != null)
+                        + " notification=" + (notification != null)
+                        + " contentIntent=" + (notification != null
+                        && notification.contentIntent != null));
+            }
+
             if (!enabled || !isHeadsUp || headsUpChild == null || !validNotification) {
                 if (handle != null) handle.setVisibility(View.GONE);
                 return;
@@ -495,7 +505,13 @@ public class MoreBubbleHookModule extends XposedModule {
         Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
         if (row != null) {
             Object headsUpState = invokeSystemUi(row, "isHeadsUpState");
-            if (Boolean.TRUE.equals(headsUpState)) return true;
+            if (headsUpState instanceof Boolean) return Boolean.TRUE.equals(headsUpState);
+            Object rowHeadsUp = getFieldSystemUi(row, "mIsHeadsUp");
+            if (rowHeadsUp instanceof Boolean) return Boolean.TRUE.equals(rowHeadsUp);
+            // If the notification row exists but its Heads-up state cannot be read,
+            // do not infer popup mode from the content layout. The same layout object
+            // is reused by the notification shade and would hide its Bubble button.
+            return false;
         }
         Object isHeadsUpValue = getFieldSystemUi(contentViewObject, "mIsHeadsUp");
         if (Boolean.TRUE.equals(isHeadsUpValue)) return true;
