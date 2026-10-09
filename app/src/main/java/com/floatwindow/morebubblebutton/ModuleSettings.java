@@ -176,12 +176,12 @@ public class ModuleSettings {
 
     public static int getSwipeHandleBottomMargin(Context ctx) {
         return clamp(getInt(ctx, KEY_SWIPE_HANDLE_BOTTOM_MARGIN,
-                DEFAULT_SWIPE_HANDLE_BOTTOM_MARGIN_DP), 0, 24);
+                DEFAULT_SWIPE_HANDLE_BOTTOM_MARGIN_DP), -10, 24);
     }
 
     public static void setSwipeHandleBottomMargin(Context ctx, int value) {
         getPrefs(ctx).edit().putInt(KEY_SWIPE_HANDLE_BOTTOM_MARGIN,
-                clamp(value, 0, 24)).apply();
+                clamp(value, -10, 24)).apply();
     }
 
     private static int clampPercent(int v) {

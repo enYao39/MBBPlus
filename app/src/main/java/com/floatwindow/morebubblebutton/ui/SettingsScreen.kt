@@ -231,8 +231,8 @@ fun SettingsScreen() {
                                 stringResource(R.string.swipe_handle_bottom_margin),
                                 swipeHandleBottomMargin.toInt()
                             ),
-                            valueRange = 0f..24f,
-                            steps = 23,
+                            valueRange = -10f..24f,
+                            steps = 33,
                             onValueChange = { swipeHandleBottomMargin = it },
                             onCommit = {
                                 ModuleSettings.setSwipeHandleBottomMargin(
@@ -241,7 +241,7 @@ fun SettingsScreen() {
                             },
                             onStep = { delta ->
                                 swipeHandleBottomMargin =
-                                    (swipeHandleBottomMargin + delta).coerceIn(0f, 24f)
+                                    (swipeHandleBottomMargin + delta).coerceIn(-10f, 24f)
                                 ModuleSettings.setSwipeHandleBottomMargin(
                                     ctx, swipeHandleBottomMargin.toInt()
                                 )

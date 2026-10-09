@@ -50,7 +50,6 @@ public class MoreBubbleHookModule extends XposedModule {
     private static Object sBubblesManager;
     private static final String HEADS_UP_HANDLE_TAG = "more_bubble_heads_up_handle";
     private static final int WINDOWING_MODE_FREEFORM = 5;
-    private static final int VISIBLE_TYPE_HEADS_UP = 2;
     private static final long SWIPE_HANDLE_MIN_DISTANCE_DP = 24L;
     private static final String LMO_FREEFORM_SERVICE = "lmo_freeform";
     private static final String LMO_FREEFORM_DESCRIPTOR =
@@ -127,12 +126,6 @@ public class MoreBubbleHookModule extends XposedModule {
                         // launcher there; use the row's own state instead of the coarse global
                         // sOnKeyguard flag because shade and keyguard rows may coexist briefly.
                         if (isOnKeyguardRow(row) || isOnKeyguardContentView(contentView)) {
-                            return false;
-                        }
-
-                        if (ctx != null && ModuleSettings.getPopupPresentation(ctx)
-                                == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE
-                                && isHeadsUpContentView(contentView)) {
                             return false;
                         }
 
@@ -932,25 +925,6 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             handle = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
         }
-    }
-
-    private static boolean isHeadsUpContentView(Object contentViewObject) {
-        Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
-        if (row != null) {
-            Object headsUpState = invokeSystemUi(row, "isHeadsUpState");
-            if (headsUpState instanceof Boolean) return Boolean.TRUE.equals(headsUpState);
-            Object rowHeadsUp = getFieldSystemUi(row, "mIsHeadsUp");
-            if (rowHeadsUp instanceof Boolean) return Boolean.TRUE.equals(rowHeadsUp);
-            // If the notification row exists but its Heads-up state cannot be read,
-            // do not infer popup mode from the content layout. The same layout object
-            // is reused by the notification shade and would hide its Bubble button.
-            return false;
-        }
-        Object isHeadsUpValue = getFieldSystemUi(contentViewObject, "mIsHeadsUp");
-        if (Boolean.TRUE.equals(isHeadsUpValue)) return true;
-        Object visibleTypeValue = getFieldSystemUi(contentViewObject, "mVisibleType");
-        return visibleTypeValue instanceof Integer
-                && ((Integer) visibleTypeValue) == VISIBLE_TYPE_HEADS_UP;
     }
 
     private static boolean isOnKeyguardRow(Object row) {
