@@ -89,6 +89,11 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final Map<View, Boolean> sTrackedHeadsUpRows = new WeakHashMap<>();
     private static volatile boolean sShadeOrQsExpanded;
     private static volatile boolean sQsFullscreen;
+    // Tracks whether any row has reported being on the keyguard. This is a
+    // coarse flag — it's set when setOnKeyguard(true) is called on ANY row,
+    // and cleared when setOnKeyguard(false) is called. Used to prevent
+    // scheduling sync runnables for newly-inflated rows on the lock screen.
+    private static volatile boolean sOnKeyguard;
 
     private void hookSystemUi(ClassLoader cl) {
         Log.i(TAG, "Hooking SystemUI...");
@@ -571,6 +576,20 @@ public class MoreBubbleHookModule extends XposedModule {
                                 && !Boolean.TRUE.equals(chain.getArg(0))) {
                             launchPendingForRow(row);
                         }
+                        if ("setOnKeyguard".equals(name)
+                                && method.getParameterCount() > 0) {
+                            boolean onKeyguard = Boolean.TRUE.equals(chain.getArg(0));
+                            sOnKeyguard = onKeyguard;
+                            if (onKeyguard) {
+                                // Lock screen activated: remove handles from ALL tracked
+                                // rows, not just this one, so newly-arriving notifications
+                                // that haven't been tracked yet are also covered.
+                                removeAllTrackedHeadsUpHandles();
+                                cancelHeadsUpRowSync(row);
+                                removeSwipeHandle(row);
+                                return result;
+                            }
+                        }
                         if (("setUserExpanded".equals(name)
                                 || "setUserSwipingToExpandRow".equals(name)
                                 || "setOnKeyguard".equals(name))
@@ -610,6 +629,11 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static void postHeadsUpRowSync(Object row) {
         if (!(row instanceof View)) return;
+        // When the shade or QS is expanded (or fullscreen), never schedule a sync.
+        // The handle would be removed immediately by syncHeadsUpSwipeHandle anyway,
+        // but skipping the post avoids a frame where the handle briefly re-appears
+        // and also prevents adding a handle to a row that isn't tracked yet.
+        if (sShadeOrQsExpanded || sQsFullscreen || sOnKeyguard) return;
         View rowView = (View) row;
         synchronized (sPendingHeadsUpSyncs) {
             if (sPendingHeadsUpSyncs.containsKey(rowView)) return;
@@ -802,6 +826,9 @@ public class MoreBubbleHookModule extends XposedModule {
         synchronized (sTrackedHeadsUpRows) {
             rows = new HashSet<>(sTrackedHeadsUpRows.keySet());
         }
+        // Cancel any pending sync runnables first — they would re-add the handle
+        // if they fire after the removal below.
+        for (View row : rows) cancelHeadsUpRowSync(row);
         for (View row : rows) removeSwipeHandle(row);
     }
 
