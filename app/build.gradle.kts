@@ -73,11 +73,18 @@ android {
     }
 
     kotlin {
-        jvmToolchain(17)
+        // Android Studio on this machine ships JDK 21. Keep the generated
+        // bytecode at Java 17 for Android compatibility while using JDK 21
+        // as the compiler toolchain.
+        jvmToolchain(21)
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {

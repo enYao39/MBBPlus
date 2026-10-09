@@ -21,8 +21,8 @@
     <string name="position_mode_follow_summary">The button uses the position chosen by Pixel Launcher.</string>
     <string name="position_x">X axis</string>
     <string name="position_y">Y axis</string>
-    <string name="position_x_hint">0% left · 100% right</string>
-    <string name="position_y_hint">0% top · 100% bottom</string>
+    <string name="position_x_hint" formatted="false">0% left · 100% right</string>
+    <string name="position_y_hint" formatted="false">0% top · 100% bottom</string>
     <string name="position_value">%1$s · %2$d%%</string>
     <string name="reset_position">Reset position</string>
     <string name="decrease_value">Decrease %1$s</string>

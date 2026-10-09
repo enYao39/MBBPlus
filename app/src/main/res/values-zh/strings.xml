@@ -21,8 +21,8 @@
     <string name="position_mode_follow_summary">按钮使用 Pixel Launcher 原本选择的位置。</string>
     <string name="position_x">X 轴</string>
     <string name="position_y">Y 轴</string>
-    <string name="position_x_hint">0% 左侧 · 100% 右侧</string>
-    <string name="position_y_hint">0% 顶部 · 100% 底部</string>
+    <string name="position_x_hint" formatted="false">0% 左侧 · 100% 右侧</string>
+    <string name="position_y_hint" formatted="false">0% 顶部 · 100% 底部</string>
     <string name="position_value">%1$s · %2$d%%</string>
     <string name="reset_position">恢复默认位置</string>
     <string name="decrease_value">减小 %1$s</string>
