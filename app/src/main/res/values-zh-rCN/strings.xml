@@ -1,5 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">更多消息气泡</string>
-    <string name="module_description">在 Pixel Launcher 最近任务界面添加「消息气泡」按钮，点击后可将当前应用变为消息气泡模式。</string>
+    <string name="module_description">在 Pixel Launcher 最近任务和通知栏中添加消息气泡按钮。</string>
+    <string name="settings_subtitle">将支持的应用变为消息气泡。</string>
+    <string name="settings_language_auto">界面语言会跟随系统自动切换</string>
+    <string name="section_recents">最近任务</string>
+    <string name="section_notifications">通知</string>
+    <string name="section_position">按钮位置</string>
+    <string name="section_actions">操作</string>
+    <string name="section_about">关于</string>
+    <string name="feature_menu_title">任务卡片菜单</string>
+    <string name="feature_menu_summary">在任务卡片图标打开的菜单中显示“消息气泡”。</string>
+    <string name="feature_action_bar_title">底部操作栏</string>
+    <string name="feature_action_bar_summary">在最近任务界面的底部操作栏显示“消息气泡”。</string>
+    <string name="feature_system_ui_title">通知气泡按钮</string>
+    <string name="feature_system_ui_summary">为可以打开应用的普通通知显示气泡按钮。</string>
+    <string name="position_mode_title">显示行</string>
+    <string name="position_mode_follow">跟随原按钮</string>
+    <string name="position_mode_second">第二行</string>
+    <string name="position_mode_follow_summary">按钮使用 Pixel Launcher 原本选择的位置。</string>
+    <string name="position_x">X 轴</string>
+    <string name="position_y">Y 轴</string>
+    <string name="position_x_hint">0% 左侧 · 100% 右侧</string>
+    <string name="position_y_hint">0% 顶部 · 100% 底部</string>
+    <string name="position_value">%1$s · %2$d%%</string>
+    <string name="reset_position">恢复默认位置</string>
+    <string name="decrease_value">减小 %1$s</string>
+    <string name="increase_value">增大 %1$s</string>
+    <string name="restart_title">应用更改</string>
+    <string name="restart_summary">重启 Pixel Launcher 和系统界面，使 Hook 与位置更改生效。</string>
+    <string name="restart_button">重启启动器和系统界面</string>
+    <string name="version_value">版本 %1$s</string>
+    <string name="compatibility_value">Android 16+ · LSPosed Modern API</string>
+    <string name="about_language">支持中文和英文，语言会根据系统设置自动检测。</string>
+    <string name="app_icon_description">更多消息气泡图标</string>
 </resources>

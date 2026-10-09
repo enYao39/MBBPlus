@@ -1,24 +1,74 @@
 package com.floatwindow.morebubblebutton.ui
 
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import android.os.Handler
+import android.os.Looper
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.floatwindow.morebubblebutton.BuildConfig
 import com.floatwindow.morebubblebutton.ModuleSettings
 import com.floatwindow.morebubblebutton.MoreBubbleHookModule
+import com.floatwindow.morebubblebutton.R
+
+private val SettingsCardShape = RoundedCornerShape(28.dp)
 
 @Composable
 fun SettingsScreen() {
     val ctx = LocalContext.current
-    val scrollState = rememberScrollState()
-
     var menuEnabled by remember { mutableStateOf(ModuleSettings.isMenuEnabled(ctx)) }
     var actionBarEnabled by remember { mutableStateOf(ModuleSettings.isActionBarEnabled(ctx)) }
     var systemUiBubbleEnabled by remember { mutableStateOf(ModuleSettings.isSystemUiBubbleEnabled(ctx)) }
@@ -26,54 +76,47 @@ fun SettingsScreen() {
     var sliderX by remember { mutableFloatStateOf(ModuleSettings.getPosX(ctx).toFloat()) }
     var sliderY by remember { mutableFloatStateOf(ModuleSettings.getPosY(ctx).toFloat()) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(scrollState)
-            .padding(16.dp)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text(
-            text = "消息气泡设置",
-            style = MaterialTheme.typography.headlineMedium,
-            modifier = Modifier.padding(bottom = 24.dp)
-        )
+        item { HeaderCard() }
 
-        Text(
-            text = "功能开关",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceContainer
-            )
-        ) {
-            Column {
-                SwitchPreferenceRow(
-                    title = "任务卡片菜单",
-                    subtitle = "在多任务界面点击 app 图标弹出的菜单中显示「消息气泡」",
+        item { SectionHeading(Icons.Default.Apps, R.string.section_recents) }
+        item {
+            SettingsCard {
+                PreferenceSwitchRow(
+                    icon = Icons.Default.Apps,
+                    title = stringResource(R.string.feature_menu_title),
+                    summary = stringResource(R.string.feature_menu_summary),
                     checked = menuEnabled,
                     onCheckedChange = {
                         menuEnabled = it
                         ModuleSettings.setMenuEnabled(ctx, it)
                     }
                 )
-                HorizontalDivider()
-                SwitchPreferenceRow(
-                    title = "底部操作栏",
-                    subtitle = "在多任务界面底部显示「消息气泡」按钮",
+                PreferenceDivider()
+                PreferenceSwitchRow(
+                    icon = Icons.Default.Tune,
+                    title = stringResource(R.string.feature_action_bar_title),
+                    summary = stringResource(R.string.feature_action_bar_summary),
                     checked = actionBarEnabled,
                     onCheckedChange = {
                         actionBarEnabled = it
                         ModuleSettings.setActionBarEnabled(ctx, it)
                     }
                 )
-                HorizontalDivider()
-                SwitchPreferenceRow(
-                    title = "通知横幅气泡",
-                    subtitle = "所有应用通知横幅右下角显示气泡图标",
+            }
+        }
+
+        item { SectionHeading(Icons.Default.Notifications, R.string.section_notifications) }
+        item {
+            SettingsCard {
+                PreferenceSwitchRow(
+                    icon = Icons.Default.Notifications,
+                    title = stringResource(R.string.feature_system_ui_title),
+                    summary = stringResource(R.string.feature_system_ui_summary),
                     checked = systemUiBubbleEnabled,
                     onCheckedChange = {
                         systemUiBubbleEnabled = it
@@ -83,153 +126,325 @@ fun SettingsScreen() {
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Text(
-            text = "位置微调",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceContainer
-            )
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "按钮显示行",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    SegmentedButton(
-                        selected = positionMode == 0,
-                        onClick = {
-                            positionMode = 0
-                            ModuleSettings.setPositionMode(ctx, 0)
-                            try { MoreBubbleHookModule.applyPositionFromSettings(ctx) } catch (_: Throwable) {}
-                        },
-                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                        label = { Text("跟随原按钮") }
-                    )
-                    SegmentedButton(
-                        selected = positionMode == 1,
-                        onClick = {
-                            positionMode = 1
-                            ModuleSettings.setPositionMode(ctx, 1)
-                            try { MoreBubbleHookModule.applyPositionFromSettings(ctx) } catch (_: Throwable) {}
-                        },
-                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                        label = { Text("第二行") }
-                    )
-                }
-
-                if (positionMode == 1) {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    FineTuneSlider(
-                        title = "X 轴（← 左 | 右 →）",
-                        value = sliderX,
-                        onValueChange = { sliderX = it },
-                        onCommit = {
-                            val x = sliderX.toInt()
-                            ModuleSettings.setPosX(ctx, x)
-                            try { MoreBubbleHookModule.applyPositionFromSettings(ctx) } catch (_: Throwable) {}
-                        },
-                        onStep = { delta ->
-                            sliderX = (sliderX + delta).coerceIn(0f, 100f)
-                            ModuleSettings.setPosX(ctx, sliderX.toInt())
-                            try { MoreBubbleHookModule.applyPositionFromSettings(ctx) } catch (_: Throwable) {}
-                        }
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    FineTuneSlider(
-                        title = "Y 轴（↑ 上 | 下 ↓）",
-                        value = sliderY,
-                        onValueChange = { sliderY = it },
-                        onCommit = {
-                            val y = sliderY.toInt()
-                            ModuleSettings.setPosY(ctx, y)
-                            try { MoreBubbleHookModule.applyPositionFromSettings(ctx) } catch (_: Throwable) {}
-                        },
-                        onStep = { delta ->
-                            sliderY = (sliderY + delta).coerceIn(0f, 100f)
-                            ModuleSettings.setPosY(ctx, sliderY.toInt())
-                            try { MoreBubbleHookModule.applyPositionFromSettings(ctx) } catch (_: Throwable) {}
-                        }
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    OutlinedButton(
-                        onClick = {
-                            sliderX = 50f
-                            sliderY = 50f
-                            ModuleSettings.setPosX(ctx, 50)
-                            ModuleSettings.setPosY(ctx, 50)
-                            try { MoreBubbleHookModule.applyPositionFromSettings(ctx) } catch (_: Throwable) {}
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("恢复默认 X/Y 位置")
-                    }
-                } else {
-                    Spacer(modifier = Modifier.height(12.dp))
+        item { SectionHeading(Icons.Default.Tune, R.string.section_position) }
+        item {
+            SettingsCard {
+                Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        text = "当前跟随 Pixel Launcher 原底部按钮位置；选择“第二行”后可使用 X/Y 精调。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = stringResource(R.string.position_mode_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
                     )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        SegmentedButton(
+                            selected = positionMode == 0,
+                            onClick = {
+                                positionMode = 0
+                                ModuleSettings.setPositionMode(ctx, 0)
+                                applyPosition(ctx)
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                            modifier = Modifier.weight(1f),
+                            label = { Text(stringResource(R.string.position_mode_follow)) }
+                        )
+                        SegmentedButton(
+                            selected = positionMode == 1,
+                            onClick = {
+                                positionMode = 1
+                                ModuleSettings.setPositionMode(ctx, 1)
+                                applyPosition(ctx)
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                            modifier = Modifier.weight(1f),
+                            label = { Text(stringResource(R.string.position_mode_second)) }
+                        )
+                    }
+
+                    if (positionMode == 1) {
+                        Spacer(modifier = Modifier.height(18.dp))
+                        FineTuneSlider(
+                            label = stringResource(R.string.position_x),
+                            hint = stringResource(R.string.position_x_hint),
+                            value = sliderX,
+                            onValueChange = { sliderX = it },
+                            onCommit = {
+                                ModuleSettings.setPosX(ctx, sliderX.toInt())
+                                applyPosition(ctx)
+                            },
+                            onStep = { delta ->
+                                sliderX = (sliderX + delta).coerceIn(0f, 100f)
+                                ModuleSettings.setPosX(ctx, sliderX.toInt())
+                                applyPosition(ctx)
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        FineTuneSlider(
+                            label = stringResource(R.string.position_y),
+                            hint = stringResource(R.string.position_y_hint),
+                            value = sliderY,
+                            onValueChange = { sliderY = it },
+                            onCommit = {
+                                ModuleSettings.setPosY(ctx, sliderY.toInt())
+                                applyPosition(ctx)
+                            },
+                            onStep = { delta ->
+                                sliderY = (sliderY + delta).coerceIn(0f, 100f)
+                                ModuleSettings.setPosY(ctx, sliderY.toInt())
+                                applyPosition(ctx)
+                            }
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedButton(
+                            onClick = {
+                                sliderX = 50f
+                                sliderY = 50f
+                                ModuleSettings.setPosX(ctx, 50)
+                                ModuleSettings.setPosY(ctx, 50)
+                                applyPosition(ctx)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.reset_position))
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = stringResource(R.string.position_mode_follow_summary),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Button(
-            onClick = {
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    try {
-                        val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "killall com.google.android.apps.nexuslauncher com.android.launcher3 com.android.systemui 2>/dev/null; sleep 1"))
-                        p.waitFor()
-                    } catch (_: Throwable) {}
-                }, 300)
-            },
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.error
-            )
-        ) {
-            Icon(Icons.Default.Refresh, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("重启启动器 + 系统界面")
+        item { SectionHeading(Icons.Default.Refresh, R.string.section_actions) }
+        item {
+            SettingsCard {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(
+                        text = stringResource(R.string.restart_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = stringResource(R.string.restart_summary),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = ::restartSystemUi,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.restart_button))
+                    }
+                }
+            }
         }
 
-        Spacer(modifier = Modifier.height(48.dp))
+        item { SectionHeading(Icons.Default.Info, R.string.section_about) }
+        item {
+            SettingsCard {
+                Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                    AboutRow(
+                        title = stringResource(R.string.app_name),
+                        value = stringResource(R.string.version_value, BuildConfig.VERSION_NAME)
+                    )
+                    AboutRow(
+                        title = stringResource(R.string.compatibility_value),
+                        value = stringResource(R.string.settings_language_auto)
+                    )
+                    Text(
+                        text = stringResource(R.string.about_language),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 14.dp)
+                    )
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun FineTuneSlider(
+private fun HeaderCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SettingsCardShape,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+    ) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                modifier = Modifier.size(68.dp),
+                shape = RoundedCornerShape(22.dp),
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.ic_launcher),
+                    contentDescription = stringResource(R.string.app_icon_description),
+                    colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.padding(14.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.app_name),
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = stringResource(R.string.settings_subtitle),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.82f)
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
+                ) {
+                    Text(
+                        text = stringResource(R.string.settings_language_auto),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SectionHeading(icon: ImageVector, titleRes: Int) {
+    Row(
+        modifier = Modifier.padding(start = 4.dp, top = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = stringResource(titleRes),
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+@Composable
+private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = SettingsCardShape,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
+    ) {
+        Column(content = content)
+    }
+}
+
+@Composable
+private fun PreferenceSwitchRow(
+    icon: ImageVector,
     title: String,
+    summary: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Surface(
+            modifier = Modifier.size(42.dp),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.secondaryContainer
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.padding(10.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun PreferenceDivider() {
+    HorizontalDivider(
+        modifier = Modifier.padding(start = 76.dp),
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+    )
+}
+
+@Composable
+private fun FineTuneSlider(
+    label: String,
+    hint: String,
     value: Float,
     onValueChange: (Float) -> Unit,
     onCommit: () -> Unit,
     onStep: (Float) -> Unit
 ) {
-    Text(
-        text = "$title: ${value.toInt()}%",
-        style = MaterialTheme.typography.bodyMedium
-    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = stringResource(R.string.position_value, label, value.toInt()),
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = hint,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
         FilledTonalIconButton(onClick = { onStep(-1f) }) {
-            Text("−", style = MaterialTheme.typography.titleLarge)
+            Icon(
+                Icons.Default.Remove,
+                contentDescription = stringResource(R.string.decrease_value, label)
+            )
         }
         Slider(
             value = value,
@@ -242,33 +457,53 @@ private fun FineTuneSlider(
                 .padding(horizontal = 8.dp)
         )
         FilledTonalIconButton(onClick = { onStep(1f) }) {
-            Text("+", style = MaterialTheme.typography.titleLarge)
+            Icon(
+                Icons.Default.Add,
+                contentDescription = stringResource(R.string.increase_value, label)
+            )
         }
     }
 }
 
 @Composable
-private fun SwitchPreferenceRow(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
+private fun AboutRow(title: String, value: String) {
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 20.dp, vertical = 10.dp),
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Text(title, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
+}
+
+private fun applyPosition(ctx: android.content.Context) {
+    try {
+        MoreBubbleHookModule.applyPositionFromSettings(ctx)
+    } catch (_: Throwable) {
+        // The hook process may not be loaded yet; the saved value is still applied on next load.
+    }
+}
+
+private fun restartSystemUi() {
+    Handler(Looper.getMainLooper()).postDelayed({
+        Thread {
+            try {
+                val process = Runtime.getRuntime().exec(
+                    arrayOf(
+                        "su",
+                        "-c",
+                        "killall com.google.android.apps.nexuslauncher com.android.launcher3 com.android.systemui 2>/dev/null"
+                    )
+                )
+                process.waitFor()
+            } catch (_: Throwable) {
+                // Root is optional for the settings screen; users can restart the processes manually.
+            }
+        }.start()
+    }, 250)
 }
