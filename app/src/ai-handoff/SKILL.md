@@ -5,14 +5,14 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 
 # MoreBubbleButton 维护技能
 
-适用于后续 AI 接手本模块的修复、功能开发和验证任务。
+适用于后续 AI 接手本模块的修复、功能开发和验证任务。本项目由 AI Agent 全程编辑；目前只在 Evolution 17 实机上测试过。
 
 ## 必做步骤
 
 1. 先阅读同目录的 `NOTES.md`，再检查模块仓库的 `git status`、最近提交和当前差异。
 2. 只在本模块目录内工作，并遵守上级 `agents.md` 的边界约束。
 3. 修改前确认现有未提交内容是否属于当前任务；不要覆盖用户已有改动。
-4. 对代码改动使用 `apply_patch`，完成一个逻辑阶段后立即创建本地 commit。
+4. 对代码改动使用 `apply_patch`，完成一个逻辑阶段后立即创建本地 commit；若用户要求版本更新，使用点号递增小版本并同步 versionCode。
 5. 至少执行 `git diff --check` 和 Debug 构建；如果设备可用，再进行安装和短时日志验证。
 6. 最终报告提交号、构建结果、设备验证是否完成，以及仍受设备权限限制的项目。
 
@@ -27,8 +27,10 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 
 ## Heads-up 和设置界面规则
 
+- Bubble/Freeform 按钮在符合条件的非锁屏通知中始终保持显示。
 - 横条只存在于 Heads-up popup，不要添加到普通通知或锁屏布局。
-- 原生 Bubble 按钮与横条是互斥的二选一。
+- Swipe 模式只额外叠加横条，不得隐藏或改变原生 Bubble/Freeform 按钮行为；下滑横条应与按钮使用同一打开和回退逻辑。
+- 横条底部间距范围为 `-10dp..24dp`；修改设置范围时必须同步更新 `ModuleSettings`、Compose 设置页、`SettingsProvider` 和中英文资源。
 - 中英文资源必须同步；英文采用 “Bubble” 和 “Freeform” 等短文案。
 - 设置项文案过长时优先缩短摘要或使用单独说明，不要让选择框被长字符串撑大。
 
@@ -38,6 +40,14 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 - 构建失败时区分源码错误、JDK/Gradle 缓存问题和网络问题，不要随意升级版本。
 - 设备命令中的序列号始终使用 `<device-serial>` 占位符；不要把真实序列号写入源码、文档或 commit message。
 - 日志只保留必要的 tag 和结论，通知内容、账号、应用数据和完整 dumpsys 不得进入仓库。
+
+## AI Agent 工作方式
+
+- 先读取 `NOTES.md`，再读取本文件；然后检查分支、工作区、最近提交和用户已有 diff。
+- 把任务拆成可回退的小阶段，每个阶段单独提交，commit message 使用简洁英文。
+- 不要凭设备序列号、个人绝对路径或历史日志推断环境；文档和命令使用 `<device-serial>` 等占位符。
+- 仅在用户要求或任务明确需要时安装 APK、采集 logcat、重启 SystemUI 或执行需要 root 的操作。
+- 发现行为依赖 Evolution 17 私有实现时，记录为“Evolution 17 已验证、其他环境未验证”，不要宣称通用 Android 兼容。
 
 ## 安全边界
 

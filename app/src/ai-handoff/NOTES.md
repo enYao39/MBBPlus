@@ -1,6 +1,6 @@
 # MoreBubbleButton 接手说明
 
-这是一份给后续维护者或其他 AI 使用的项目说明。它只记录代码结构、设计约束和可复用的验证方法，不包含设备序列号、用户目录、通知正文、完整日志或任何密钥。
+这是一份给后续维护者或其他 AI Agent 使用的项目说明。本项目的代码、调试、重构、文档和构建修改均由 AI Agent 编辑完成；当前只在 Evolution 17 实机上测试过，其他系统版本必须重新验证。本文件只记录代码结构、设计约束和可复用的验证方法，不包含设备序列号、用户目录、通知正文、完整日志或任何密钥。
 
 ## 项目边界
 
@@ -26,10 +26,11 @@
 ## 当前行为约定
 
 1. 打开方式可选 Bubble 或 Freeform。
-2. Heads-up 中的原生 Bubble 按钮和底部横条互斥；横条只添加到 Heads-up popup。
-3. Freeform 启动失败时依次回退到 Bubble，再回退到全屏 PendingIntent。
-4. 文案统一使用 “Bubble”，不要重新引入 “Message Bubble”。
-5. 没有 root 时不能把“手动重启 SystemUI”当作模块功能；只能提示用户使用设备支持的重载方式。
+2. Bubble/Freeform 按钮在所有符合条件的非锁屏通知中保持显示。Swipe 模式不会隐藏 Heads-up 中的按钮，只会在 Heads-up popup 额外添加底部横条。
+3. 横条只存在于 Heads-up popup，不要添加到普通通知列表或锁屏布局。横条的底部间距支持 `-10dp..24dp`，负值表示将横条向通知底部外侧下移。
+4. Freeform 启动失败时依次回退到 Bubble，再回退到全屏 PendingIntent。
+5. 文案统一使用 “Bubble”，不要重新引入 “Message Bubble”。
+6. 没有 root 时不能把“手动重启 SystemUI”当作模块功能；只能提示用户使用设备支持的重载方式。
 
 ## Evolution/LMO Freeform 适配
 
@@ -51,7 +52,7 @@ Evolution 衍生系统可能不暴露传统的 `FEATURE_FREEFORM_WINDOW_MANAGEME
 
 ```sh
 # 在模块仓库根目录执行
-./gradlew :app:assembleDebug
+./gradlew :app:assembleDebug --offline --no-daemon
 
 # 仅在用户明确要求安装测试时执行
 adb devices
@@ -71,6 +72,20 @@ adb -s <device-serial> logcat -v brief \
 - 是否仍有 `Background activity launch blocked`
 
 如果 APK 已更新但日志没有新 Hook，先确认 SystemUI 已重新加载模块；部分设备不允许 adb shell 在无 root 情况下重启持久化的 SystemUI，此时应让用户手动重启或重新启动设备后再测。
+
+## AI Agent 接手模板
+
+启动新 Agent 时，建议明确给出以下上下文：
+
+```text
+这是一个由 AI Agent 全程编辑的 MoreBubbleButton Android/Xposed 项目。
+当前只在 Evolution 17 上测试过。请先阅读本目录的 NOTES.md 和 SKILL.md，
+再检查 git status、分支和现有 diff。不要覆盖用户修改，不要提交设备序列号、
+个人路径、通知正文、完整日志、APK 或密钥。代码修改使用 apply_patch；完成后
+执行 git diff --check、Debug 构建，并报告是否安装和实机验证。
+```
+
+如果任务涉及 SystemUI、Heads-up、Bubble 或 Freeform，Agent 必须同时核对通知所在状态（Heads-up、普通通知、锁屏）和打开回退链路，不要只验证“方法调用返回成功”。
 
 ## 提交和隐私要求
 

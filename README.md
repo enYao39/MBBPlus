@@ -1,20 +1,33 @@
 # MoreBubbleButton
 
-Xposed 模块，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心添加「消息气泡」能力。
+MoreBubbleButton 是一个由 AI Agent 全程编辑和维护的 Android/Xposed 模块，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心添加 Bubble/Freeform 能力。
+
+> 当前仅在 Evolution 17 实机上测试过。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
+
+当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.10 (18)`。
 
 ## 功能
 
 - 在 Pixel Launcher 多任务界面底部操作栏添加「🫧 消息气泡」按钮
 - 在任务卡片菜单（点击 app 左上角图标）中添加「🫧 消息气泡」选项
 - 点击后将当前选中的应用变为 app bubble
-- 在 SystemUI 通知中心为可打开的普通通知显示消息气泡按钮
-- 点击通知气泡按钮后：
-  - 创建并展开 app bubble
+- 自动检测系统语言，提供中文和英文界面
+- 在 SystemUI 通知中心为非锁屏、可打开的普通通知显示 Bubble/Freeform 按钮
+- Bubble/Freeform 按钮支持两种打开方式：
+  - Bubble：创建并展开 app bubble
+  - Freeform：优先以系统自由窗口打开
+- Freeform 不可用时自动回退到 Bubble，再回退到全屏启动
+- 点击通知按钮后：
   - 优先跳转通知 `contentIntent` 对应界面，而不是只打开 app 首页
   - 自动收起通知中心
   - 对 `FLAG_AUTO_CANCEL` 通知执行移除，使其表现为已读/已处理
+- Heads-up popup 支持横条模式：保留原生 Bubble/Freeform 按钮，并额外叠加可下滑横条
+  - 横条只显示在 Heads-up popup，不显示在普通通知列表或锁屏界面
+  - 下滑横条会打开当前通知对应的 Bubble/Freeform 目标
+  - 横条长度、粗细和距通知底部的间距可调；间距范围为 `-10dp..24dp`
+- 锁屏界面不显示额外的 Bubble/Freeform 按钮或横条
 - 自动过滤无启动入口或特殊用户通知，避免 `android` / `user=-1` 等无效场景导致 SystemUI 崩溃
-- 设置界面支持 X/Y 轴位置调节，滑杆旁提供 `+` / `−` 精细调节按钮
+- 设置界面支持 X/Y 轴位置调节、滑杆旁的 `+` / `−` 精细调节按钮，以及横条尺寸设置
 
 ## 要求
 
@@ -22,6 +35,7 @@ Xposed 模块，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心�
 - 已安装 LSPosed / KernelSU + Zygisk
 - Pixel Launcher (NexusLauncher)
 - SystemUI 通知气泡功能需要把作用域同时勾选到 `com.android.systemui`
+- 当前已知实机验证环境：Evolution 17；其他环境仅属于未验证状态
 
 ## 安装
 
@@ -43,11 +57,15 @@ Xposed 模块，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心�
 
 进入多任务界面 → 点击任务卡片左上角 app 图标 → 点击「🫧 消息气泡」。
 
-### 方式三：通知中心气泡按钮
+### 方式三：通知中心 Bubble/Freeform 按钮
 
-下拉通知中心 → 对支持打开的普通通知点击气泡图标 → 自动打开对应通知界面的 app bubble。
+下拉通知中心 → 对支持打开的普通通知点击 Bubble/Freeform 图标 → 自动打开对应通知界面。
 
-### 方式四：设置界面
+### 方式四：Heads-up 横条
+
+在设置中选择“下滑横条” → 新通知以 Heads-up popup 出现时，原生按钮和横条都会显示 → 下滑横条打开当前通知。
+
+### 方式五：设置界面
 
 打开 MoreBubbleButton 应用 → 调整开关和按钮位置。
 
@@ -57,7 +75,11 @@ Xposed 模块，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心�
 |------|------|--------|
 | 任务卡片菜单 | 在菜单中显示消息气泡选项 | 开 |
 | 底部操作栏 | 在底部显示消息气泡按钮 | 开 |
-| 通知横幅气泡 | 在 SystemUI 通知中心显示气泡按钮 | 开 |
+| 通知 Bubble 按钮 | 在非锁屏通知中显示 Bubble/Freeform 按钮 | 开 |
+| Heads-up 操作方式 | Bubble 按钮 / 下滑横条；下滑横条模式会在按钮之外增加横条 | Bubble 按钮 |
+| 横条长度 | Heads-up 横条长度 | 56dp |
+| 横条粗细 | Heads-up 横条粗细 | 7dp |
+| 横条距底部 | 横条相对通知底部的位置，支持 `-10dp..24dp` | 3dp |
 | 按钮位置 | 跟随原按钮 / 第二行 | 跟随原按钮 |
 | X 轴 | 水平位置，支持滑杆和 `+` / `−` 精调 | 50% |
 | Y 轴 | 垂直位置，支持滑杆和 `+` / `−` 精调 | 50% |
@@ -65,7 +87,7 @@ Xposed 模块，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心�
 
 ## 技术实现
 
-基于 [libxposed API 102](https://github.com/libxposed/api)，Hook Pixel Launcher 与 SystemUI。
+基于 [libxposed API 102](https://github.com/libxposed/api)，Hook Pixel Launcher 与 SystemUI。当前实现以 Evolution 17 的类结构和运行行为为主要适配目标。
 
 ### Pixel Launcher
 
@@ -81,7 +103,7 @@ Xposed 模块，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心�
 
 | Hook 目标 | 作用 |
 |-----------|------|
-| `NotificationContentView.shouldShowBubbleButton` | 为符合条件的通知显示气泡按钮 |
+| `NotificationContentView.shouldShowBubbleButton` | 为符合条件的非锁屏通知显示 Bubble/Freeform 按钮；swipe 模式不再隐藏按钮 |
 | `BubblesManager.onUserChangedBubble` / `expandStackAndSelectBubble` | 拦截通知气泡点击，改走稳定的 app bubble 路径 |
 | `BubbleController.expandStackAndSelectBubble(Intent, UserHandle, EntryPoint, null)` | 使用通知 `contentIntent` 创建并展开 app bubble |
 | `BubbleCoordinator.removeNotification` | 在气泡成功展开后移除 auto-cancel 通知 |
@@ -89,25 +111,55 @@ Xposed 模块，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心�
 ## 构建
 
 ```bash
-cd source/BubbleButtonModule
-source [LOCAL_PATH_REDACTED]
-export GRADLE_USER_HOME=$PWD/../.gradle
-./gradlew assembleDebug
-./gradlew assembleRelease
+cd MoreBubbleButton
+./gradlew :app:assembleDebug --offline --no-daemon
 ```
+
+项目使用 Gradle Wrapper、Android Gradle Plugin 和 Kotlin Compose；当前构建要求 JDK 21，Android Studio 自带 JDK 即可。首次构建若本地缓存不完整，可以去掉 `--offline`，但这会需要网络下载依赖。
 
 APK 输出：
 
 - Debug: `app/build/outputs/apk/debug/app-debug.apk`
 - Release: `app/build/outputs/apk/release/app-release.apk`
 
+安装调试 APK（仅在明确需要设备验证时执行）：
+
+```bash
+adb devices
+adb -s <device-serial> install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+安装后在 LSPosed 中启用模块并勾选 Launcher 和 SystemUI 作用域；修改 Hook 逻辑后通常需要重新加载 SystemUI/Launcher。没有 root 时不要假设 Agent 可以自动重启系统进程。
+
 ## Release
 
 Release 构建启用 R8 minify 与 resource shrink，并使用 release keystore 签名。
 
-## AI 声明
+## AI 声明与验证边界
 
-本项目部分代码、调试与发布说明由 AI 辅助完成，最终行为以真实设备验证为准。
+本项目的代码、重构、问题排查、文档和构建修改均由 AI Agent 编辑完成；人工主要提供需求、设备环境和实际体验反馈。当前功能只在 Evolution 17 上进行过实机验证，任何其他设备上的结论都必须重新测试。
+
+## 让其他 AI Agent 接手
+
+建议在项目根目录启动 Agent，并把以下内容作为任务上下文：
+
+```text
+请维护 MoreBubbleButton。先阅读 app/src/ai-handoff/NOTES.md 和
+app/src/ai-handoff/SKILL.md，再检查 git status、当前分支和未提交差异。
+保留用户已有修改；只在本模块目录内工作；完成后执行 git diff --check，
+构建并报告测试结果。设备验证只使用用户明确提供的设备，不要把设备序列号、
+个人路径、通知正文、日志或密钥写入仓库。
+```
+
+Agent 接手时应遵循以下顺序：
+
+1. 阅读 `app/src/ai-handoff/NOTES.md` 与 `app/src/ai-handoff/SKILL.md`。
+2. 检查当前分支、工作区差异和最近提交，不覆盖未提交的用户修改。
+3. 修改代码时使用 `apply_patch`，每个独立阶段创建一个简洁的本地 commit。
+4. 至少执行 `git diff --check` 和 Debug 构建；安装或重启 SystemUI 前先确认用户要求及设备权限。
+5. 只保留脱敏后的结论，不提交 APK、设备 dump、完整 logcat、反编译产物或个人信息。
+
+更详细的模块约束、Freeform 适配说明和日志验证方法见 `app/src/ai-handoff/NOTES.md`；可复用的维护流程见 `app/src/ai-handoff/SKILL.md`。
 
 ## License
 
