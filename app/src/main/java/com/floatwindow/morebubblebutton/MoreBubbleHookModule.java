@@ -86,6 +86,9 @@ public class MoreBubbleHookModule extends XposedModule {
     // pending synchronization runnable per row so the handle never creates a second layout pass
     // for every callback in the same frame.
     private static final Map<View, Runnable> sPendingHeadsUpSyncs = new WeakHashMap<>();
+    private static final Map<View, Boolean> sTrackedHeadsUpRows = new WeakHashMap<>();
+    private static volatile boolean sShadeOrQsExpanded;
+    private static volatile boolean sQsFullscreen;
 
     private void hookSystemUi(ClassLoader cl) {
         Log.i(TAG, "Hooking SystemUI...");
@@ -481,6 +484,7 @@ public class MoreBubbleHookModule extends XposedModule {
             hookRowMethods(rowClass, "onDetachedFromWindow", false);
             hookRowMethods(rowClass, "setUserExpanded", false);
             hookRowMethods(rowClass, "setUserSwipingToExpandRow", false);
+            hookRowMethods(rowClass, "setOnKeyguard", false);
             hookRowMethods(rowClass, "setHeadsUpAnimatingAway", false);
             hookRowMethods(rowClass, "onNotificationUpdated", true);
             hookRowMethods(rowClass, "setBubbleClickListener", true);
@@ -498,16 +502,35 @@ public class MoreBubbleHookModule extends XposedModule {
             Set<String> hooked = new HashSet<>();
             for (Class<?> type = managerClass; type != null; type = type.getSuperclass()) {
                 for (Method method : type.getDeclaredMethods()) {
-                    if (!"onEntryAnimatingAwayEnded".equals(method.getName())
+                    String name = method.getName();
+                    if (!("onEntryAnimatingAwayEnded".equals(name)
+                            || "onShadeOrQsExpanded".equals(name)
+                            || "onQsFullscreen".equals(name))
                             || method.getParameterCount() != 1
                             || !hooked.add(method.toGenericString())) continue;
                     method.setAccessible(true);
                     hook(method).intercept(chain -> {
                         Object result = chain.proceed();
-                        launchPendingForEntry(chain.getArg(0));
+                        if ("onEntryAnimatingAwayEnded".equals(name)) {
+                            launchPendingForEntry(chain.getArg(0));
+                        } else if ("onShadeOrQsExpanded".equals(name)) {
+                            sShadeOrQsExpanded = Boolean.TRUE.equals(chain.getArg(0));
+                            if (sShadeOrQsExpanded) {
+                                removeAllTrackedHeadsUpHandles();
+                            } else {
+                                postAllTrackedHeadsUpSyncs();
+                            }
+                        } else if ("onQsFullscreen".equals(name)) {
+                            sQsFullscreen = Boolean.TRUE.equals(chain.getArg(0));
+                            if (sQsFullscreen) {
+                                removeAllTrackedHeadsUpHandles();
+                            } else {
+                                postAllTrackedHeadsUpSyncs();
+                            }
+                        }
                         return result;
                     });
-                    Log.i(TAG, "Hooked HeadsUpManagerImpl.onEntryAnimatingAwayEnded OK");
+                    Log.i(TAG, "Hooked HeadsUpManagerImpl." + name + " OK");
                 }
             }
         } catch (Throwable t) {
@@ -538,6 +561,7 @@ public class MoreBubbleHookModule extends XposedModule {
                         Object row = chain.getThisObject();
                         if ("onDetachedFromWindow".equals(name)) {
                             cancelHeadsUpRowSync(row);
+                            untrackHeadsUpRow(row);
                             cancelPendingForRow(row);
                             removeSwipeHandle(row);
                             return result;
@@ -548,8 +572,9 @@ public class MoreBubbleHookModule extends XposedModule {
                             launchPendingForRow(row);
                         }
                         if (("setUserExpanded".equals(name)
-                                || "setUserSwipingToExpandRow".equals(name))
-                                && isRowExpandedOrSwiping(row)) {
+                                || "setUserSwipingToExpandRow".equals(name)
+                                || "setOnKeyguard".equals(name))
+                                && !isHeadsUpPopupAvailable(row)) {
                             cancelHeadsUpRowSync(row);
                             removeSwipeHandle(row);
                             return result;
@@ -620,6 +645,7 @@ public class MoreBubbleHookModule extends XposedModule {
             removeSwipeHandle(row);
             return;
         }
+        trackHeadsUpRow(row);
         Context ctx = host.getContext();
         try {
             boolean enabled = ModuleSettings.isSystemUiBubbleEnabled(ctx)
@@ -629,8 +655,7 @@ public class MoreBubbleHookModule extends XposedModule {
             boolean validNotification = notification != null
                     && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
                     && notification.contentIntent != null;
-            if (!enabled || !isHeadsUpRow(row) || !validNotification
-                    || isRowExpandedOrSwiping(row)) {
+            if (!enabled || !validNotification || !isHeadsUpPopupAvailable(row)) {
                 removeSwipeHandle(row);
                 return;
             }
@@ -736,6 +761,56 @@ public class MoreBubbleHookModule extends XposedModule {
         if (Boolean.TRUE.equals(value)) return true;
         value = invokeSystemUi(row, "isExpanded");
         return Boolean.TRUE.equals(value);
+    }
+
+    private static boolean isHeadsUpPopupAvailable(Object row) {
+        if (!isHeadsUpRow(row) || isRowExpandedOrSwiping(row)) return false;
+        if (sShadeOrQsExpanded || sQsFullscreen) return false;
+
+        Object onKeyguard = invokeSystemUi(row, "isOnKeyguard");
+        if (Boolean.TRUE.equals(onKeyguard)
+                || Boolean.TRUE.equals(getFieldSystemUi(row, "mOnKeyguard"))) {
+            return false;
+        }
+
+        // Prefer the manager's authoritative shade state. This also covers the case where the
+        // module is loaded after the notification shade was already expanded.
+        Object manager = getFieldSystemUi(row, "mHeadsUpManager");
+        if (Boolean.TRUE.equals(getFieldSystemUi(manager, "mIsShadeOrQsExpanded"))
+                || Boolean.TRUE.equals(getFieldSystemUi(manager, "mIsQsFullscreen"))) {
+            return false;
+        }
+        return true;
+    }
+
+    private static void trackHeadsUpRow(Object row) {
+        if (!(row instanceof View)) return;
+        synchronized (sTrackedHeadsUpRows) {
+            sTrackedHeadsUpRows.put((View) row, Boolean.TRUE);
+        }
+    }
+
+    private static void untrackHeadsUpRow(Object row) {
+        if (!(row instanceof View)) return;
+        synchronized (sTrackedHeadsUpRows) {
+            sTrackedHeadsUpRows.remove((View) row);
+        }
+    }
+
+    private static void removeAllTrackedHeadsUpHandles() {
+        Set<View> rows;
+        synchronized (sTrackedHeadsUpRows) {
+            rows = new HashSet<>(sTrackedHeadsUpRows.keySet());
+        }
+        for (View row : rows) removeSwipeHandle(row);
+    }
+
+    private static void postAllTrackedHeadsUpSyncs() {
+        Set<View> rows;
+        synchronized (sTrackedHeadsUpRows) {
+            rows = new HashSet<>(sTrackedHeadsUpRows.keySet());
+        }
+        for (View row : rows) postHeadsUpRowSync(row);
     }
 
     private static boolean isHeadsUpRow(Object row) {
