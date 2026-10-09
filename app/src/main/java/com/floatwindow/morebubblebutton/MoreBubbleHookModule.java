@@ -98,8 +98,8 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private void hookSystemUi(ClassLoader cl) {
         Log.i(TAG, "Hooking SystemUI...");
-        // 1. shouldShowBubbleButton: 让所有非前台通知显示气泡按钮。
-        //    横条模式与原生按钮互斥，所以这里必须强制隐藏原生按钮。
+        // 1. shouldShowBubbleButton: 让所有具备可打开入口的非锁屏通知显示按钮。
+        //    横条模式与 Heads-up 中的原生按钮互斥，但通知下拉列表仍保留按钮。
         Class<?> contentViewClass = null;
         try {
             contentViewClass = cl.loadClass(
@@ -115,32 +115,36 @@ public class MoreBubbleHookModule extends XposedModule {
                     throw new NoSuchMethodException("shouldShowBubbleButton");
                 }
                 hook(shouldShowBubbleButton).intercept(chain -> {
+                    Object contentView = chain.getThisObject();
+                    Object row = getFieldSystemUi(contentView, "mContainingNotification");
                     try {
                         Context ctx = null;
-                        try { ctx = ((View) chain.getThisObject()).getContext(); } catch (Throwable ignored) {}
+                        try { ctx = ((View) contentView).getContext(); } catch (Throwable ignored) {}
                         if (ctx != null && !ModuleSettings.isSystemUiBubbleEnabled(ctx)) return chain.proceed();
+
+                        // A notification row can report the native button as available even on
+                        // the public/keyguard layout. The module must never expose the extra
+                        // launcher there; use the row's own state instead of the coarse global
+                        // sOnKeyguard flag because shade and keyguard rows may coexist briefly.
+                        if (isOnKeyguardRow(row) || isOnKeyguardContentView(contentView)) {
+                            return false;
+                        }
+
                         if (ctx != null && ModuleSettings.getPopupPresentation(ctx)
                                 == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE
-                                && isHeadsUpContentView(chain.getThisObject())) return false;
+                                && isHeadsUpContentView(contentView)) {
+                            return false;
+                        }
+
+                        // shouldShowBubbleButton() can run before onNotificationUpdated() or
+                        // setBubbleClickListener(). Prepare the metadata first so the first
+                        // inflation gets the same action as later refreshes.
+                        prepareBubbleMetadata(getNotificationEntryFromRow(row));
                     } catch (Throwable ignored) {}
+
                     boolean original = (boolean) chain.proceed();
                     if (original) return true;
-                    try {
-                        Object contentView = chain.getThisObject();
-                        Object row = getFieldSystemUi(contentView, "mContainingNotification");
-                        if (row == null) return true;
-                        Object adapter = getFieldSystemUi(row, "mEntryAdapter");
-                        if (adapter == null) return true;
-                        Object sbn = invokeSystemUi(adapter, "getSbn");
-                        if (sbn == null) return true;
-                        Notification notif = (Notification) invokeSystemUi(sbn, "getNotification");
-                        if (notif == null) return true;
-                        if ((notif.flags & 0x40) != 0) return false;
-                        String pkg = (String) sbn.getClass().getMethod("getPackageName").invoke(sbn);
-                        Context viewCtx = ((View) contentView).getContext();
-                        if (pkg == null || viewCtx.getPackageManager().getLaunchIntentForPackage(pkg) == null) return false;
-                        return true;
-                    } catch (Throwable t) { return true; }
+                    return isBubbleButtonEligible(row);
                 });
                 Log.i(TAG, "Hooked shouldShowBubbleButton OK");
             } catch (Throwable t) {
@@ -441,12 +445,19 @@ public class MoreBubbleHookModule extends XposedModule {
                 try {
                     method.setAccessible(true);
                     hook(method).intercept(chain -> {
-                        Object result = chain.proceed();
                         Object contentView = chain.getThisObject();
+                        Object row = getFieldSystemUi(contentView, "mContainingNotification");
+                        if ("onNotificationUpdated".equals(name)
+                                || "setBubbleClickListener".equals(name)) {
+                            // The visibility check can happen during the same bind, before
+                            // SystemUI's later callback refreshes the row. Keep metadata ready
+                            // for both the shade and the Heads-up layout on first inflation.
+                            prepareBubbleMetadata(getNotificationEntryFromRow(row));
+                        }
+                        Object result = chain.proceed();
                         updateHeadsUpSwipeHandle(contentView);
                         if ("onNotificationUpdated".equals(name)
                                 || "setBubbleClickListener".equals(name)) {
-                            Object row = getFieldSystemUi(contentView, "mContainingNotification");
                             prepareBubbleMetadata(getNotificationEntryFromRow(row));
                             refreshBubbleButton(row);
                         }
@@ -940,6 +951,33 @@ public class MoreBubbleHookModule extends XposedModule {
         Object visibleTypeValue = getFieldSystemUi(contentViewObject, "mVisibleType");
         return visibleTypeValue instanceof Integer
                 && ((Integer) visibleTypeValue) == VISIBLE_TYPE_HEADS_UP;
+    }
+
+    private static boolean isOnKeyguardRow(Object row) {
+        if (row == null) return false;
+        Object value = invokeSystemUi(row, "isOnKeyguard");
+        if (Boolean.TRUE.equals(value)) return true;
+        return Boolean.TRUE.equals(getFieldSystemUi(row, "mOnKeyguard"));
+    }
+
+    private static boolean isOnKeyguardContentView(Object contentView) {
+        if (contentView == null) return false;
+        return Boolean.TRUE.equals(getFieldSystemUi(contentView, "mOnKeyguard"));
+    }
+
+    private static boolean isBubbleButtonEligible(Object row) {
+        if (row == null || isOnKeyguardRow(row)) return false;
+        try {
+            Object sbn = getNotificationSbnFromRow(row);
+            Notification notification = sbn != null
+                    ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
+            return notification != null
+                    && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0
+                    && notification.contentIntent != null;
+        } catch (Throwable t) {
+            Log.w(TAG, "Bubble button eligibility: " + t.getMessage());
+            return false;
+        }
     }
 
     private static Object getNotificationSbnFromRow(Object row) {
