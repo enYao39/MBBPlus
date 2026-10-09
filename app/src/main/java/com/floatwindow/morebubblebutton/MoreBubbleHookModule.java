@@ -134,14 +134,18 @@ public class MoreBubbleHookModule extends XposedModule {
         }
         if (contentViewClass != null) {
             try {
-                Method shouldShowBubbleButton = findMethodSystemUi(
-                        contentViewClass, "shouldShowBubbleButton");
+                Method shouldShowBubbleButton = findBubbleVisibilityMethod(contentViewClass);
                 if (shouldShowBubbleButton == null) {
                     throw new NoSuchMethodException("shouldShowBubbleButton");
                 }
                 hook(shouldShowBubbleButton).intercept(chain -> {
                     Object contentView = chain.getThisObject();
                     Object row = getFieldSystemUi(contentView, "mContainingNotification");
+                    Object entry = getNotificationEntryFromRow(row);
+                    if (shouldShowBubbleButton.getParameterCount() > 0
+                            && chain.getArg(0) != null) {
+                        entry = chain.getArg(0);
+                    }
                     try {
                         Context ctx = null;
                         try { ctx = ((View) contentView).getContext(); } catch (Throwable ignored) {}
@@ -158,14 +162,15 @@ public class MoreBubbleHookModule extends XposedModule {
                         // shouldShowBubbleButton() can run before onNotificationUpdated() or
                         // setBubbleClickListener(). Prepare the metadata first so the first
                         // inflation gets the same action as later refreshes.
-                        prepareBubbleMetadata(getNotificationEntryFromRow(row));
+                        prepareBubbleMetadata(entry);
                     } catch (Throwable ignored) {}
 
                     boolean original = (boolean) chain.proceed();
                     if (original) return true;
-                    return isBubbleButtonEligible(row);
+                    return isBubbleButtonEligible(row, entry);
                 });
-                Log.i(TAG, "Hooked shouldShowBubbleButton OK");
+                Log.i(TAG, "Hooked shouldShowBubbleButton OK: "
+                        + shouldShowBubbleButton.getParameterCount() + " args");
             } catch (Throwable t) {
                 Log.e(TAG, "Hook shouldShowBubbleButton: " + t.getMessage());
             }
@@ -416,6 +421,26 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) { Log.w(TAG, "Hook select guard: " + t.getMessage()); }
 
         Log.i(TAG, "All SystemUI hooks installed");
+    }
+
+    /**
+     * Evolution exposes shouldShowBubbleButton() without arguments, while Lunaris 3.12
+     * passes the current NotificationEntry to shouldShowBubbleButton(NotificationEntry).
+     */
+    private static Method findBubbleVisibilityMethod(Class<?> contentViewClass) {
+        for (Class<?> type = contentViewClass; type != null; type = type.getSuperclass()) {
+            for (Method method : type.getDeclaredMethods()) {
+                if (!"shouldShowBubbleButton".equals(method.getName())) continue;
+                int count = method.getParameterCount();
+                if (count == 0
+                        || (count == 1
+                        && method.getParameterTypes()[0].getName().contains("NotificationEntry"))) {
+                    method.setAccessible(true);
+                    return method;
+                }
+            }
+        }
+        return null;
     }
 
     private void hookBubblesManagerConstructors(Class<?> bubblesCls) {
@@ -988,9 +1013,14 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static boolean isBubbleButtonEligible(Object row) {
-        if (row == null || isOnKeyguardRow(row)) return false;
+        return isBubbleButtonEligible(row, getNotificationEntryFromRow(row));
+    }
+
+    private static boolean isBubbleButtonEligible(Object row, Object entry) {
+        if (row != null && isOnKeyguardRow(row)) return false;
         try {
-            Object sbn = getNotificationSbnFromRow(row);
+            Object sbn = entry != null ? getFieldSystemUi(entry, "mSbn") : null;
+            if (sbn == null) sbn = getNotificationSbnFromRow(row);
             Notification notification = sbn != null
                     ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
             return notification != null
