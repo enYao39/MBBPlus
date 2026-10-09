@@ -573,8 +573,8 @@ public class MoreBubbleHookModule extends XposedModule {
 
     /**
      * Adds the small bottom-center handle only to a real Heads-up popup row.
-     * Evolution17 leaves NotificationContentView.mHeadsUpChild empty, so the row is the
-     * stable host and the strict row state keeps the handle out of the notification shade.
+     * The handle is hosted by the actual mHeadsUpChild when available, so it follows the same
+     * content transform as the popup instead of appearing with the outer row first.
      */
     private static void updateHeadsUpSwipeHandle(Object contentViewObject) {
         Object row = getFieldSystemUi(contentViewObject, "mContainingNotification");
@@ -610,9 +610,14 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static void syncHeadsUpSwipeHandle(Object row) {
         if (!(row instanceof ViewGroup)) return;
-        ViewGroup host = (ViewGroup) row;
+        ViewGroup rowView = (ViewGroup) row;
         if (Looper.myLooper() != Looper.getMainLooper()) {
             postHeadsUpRowSync(row);
+            return;
+        }
+        ViewGroup host = getHeadsUpHandleHost(row);
+        if (host == null) {
+            removeSwipeHandle(row);
             return;
         }
         Context ctx = host.getContext();
@@ -630,7 +635,7 @@ public class MoreBubbleHookModule extends XposedModule {
                 return;
             }
 
-            View handle = host.findViewWithTag(HEADS_UP_HANDLE_TAG);
+            View handle = rowView.findViewWithTag(HEADS_UP_HANDLE_TAG);
             if (handle != null && handle.getParent() != host) {
                 if (handle.getParent() instanceof ViewGroup) {
                     ((ViewGroup) handle.getParent()).removeView(handle);
@@ -690,7 +695,8 @@ public class MoreBubbleHookModule extends XposedModule {
                 addHandleToRow(host, newHandle, lp);
                 handle = newHandle;
                 Log.i(TAG, "Heads-up swipe handle attached to "
-                        + host.getClass().getSimpleName());
+                        + host.getClass().getSimpleName() + " inside "
+                        + rowView.getClass().getSimpleName());
             }
             if (handle.getParent() != host) {
                 if (handle.getParent() instanceof ViewGroup) {
@@ -711,6 +717,16 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) {
             Log.w(TAG, "sync Heads-up handle: " + t.getMessage());
         }
+    }
+
+    private static ViewGroup getHeadsUpHandleHost(Object row) {
+        Object privateLayout = getFieldSystemUi(row, "mPrivateLayout");
+        if (privateLayout != null) {
+            Object headsUpChild = getFieldSystemUi(privateLayout, "mHeadsUpChild");
+            if (headsUpChild instanceof ViewGroup) return (ViewGroup) headsUpChild;
+            if (privateLayout instanceof ViewGroup) return (ViewGroup) privateLayout;
+        }
+        return row instanceof ViewGroup ? (ViewGroup) row : null;
     }
 
     private static boolean isRowExpandedOrSwiping(Object row) {
@@ -880,13 +896,18 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static Object getHeadsUpRowFromHandle(View handle) {
         if (handle == null) return null;
-        Object parent = handle.getParent();
-        Object row = getFieldSystemUi(parent, "mContainingNotification");
-        if (row != null) return row;
-        // When the handle is attached directly to ExpandableNotificationRow, the parent
-        // itself is the row and has isHeadsUpState().
-        return parent != null && findMethodSystemUi(parent.getClass(), "isHeadsUpState") != null
-                ? parent : null;
+        android.view.ViewParent parent = handle.getParent();
+        while (parent != null) {
+            Object row = getFieldSystemUi(parent, "mContainingNotification");
+            if (row != null) return row;
+            // When the handle is attached directly to ExpandableNotificationRow, the parent
+            // itself is the row and has isHeadsUpState().
+            if (findMethodSystemUi(parent.getClass(), "isHeadsUpState") != null) {
+                return parent;
+            }
+            parent = parent.getParent();
+        }
+        return null;
     }
 
     private static float swipeDistance(Context ctx) {
