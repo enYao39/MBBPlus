@@ -558,40 +558,14 @@ public class MoreBubbleHookModule extends XposedModule {
         if (android.os.Process.myUid() == android.os.Process.SYSTEM_UID
                 && launchNotificationViaLmoBinder(ctx, sbn, notification, reason)) return true;
 
-        // Prefer the framework path now that Android 17's BAL allowance is set.
-        // This keeps the original PendingIntent (including its deep-link extras)
-        // and asks ActivityTaskManager to create the task directly in Freeform,
-        // avoiding the visible fullscreen-then-reparent animation.
-        if (launchNotificationDirectFreeform(ctx, notification, reason)) return true;
-
-        // SystemUI can send the notification PendingIntent, but cannot call the
-        // LMO Binder service directly. Let the PendingIntent create its real task
-        // first, then ask the exported system-UID receiver to move that task into
-        // an LMO Freeform display. This keeps the original notification extras.
+        // SystemUI cannot call the LMO Binder service directly. Stage the exact
+        // notification PendingIntent behind the current task, then ask the
+        // exported system-UID receiver to move that task into an LMO Freeform
+        // display. This preserves the notification extras without exposing a
+        // fullscreen task-switch animation to the user.
         if (launchNotificationByTaskMove(ctx, sbn, notification, reason)) return true;
 
         return launchNotificationViaLmoComponent(ctx, sbn, notification, reason);
-    }
-
-    private static boolean launchNotificationDirectFreeform(Context ctx,
-            Notification notification, String reason) {
-        if (notification == null || notification.contentIntent == null) return false;
-        try {
-            ActivityOptions options = ActivityOptions.makeBasic();
-            if (!configureFreeformOptions(options, ctx, true)) {
-                Log.w(TAG, reason + ": direct Freeform ActivityOptions unavailable");
-                return false;
-            }
-            setPendingIntentBackgroundStartAllowed(options);
-            notification.contentIntent.send(options.toBundle());
-            Log.i(TAG, reason + ": launched exact notification Intent directly in Freeform");
-            return true;
-        } catch (PendingIntent.CanceledException e) {
-            Log.w(TAG, reason + ": direct Freeform PendingIntent canceled");
-        } catch (Throwable t) {
-            Log.w(TAG, reason + ": direct Freeform launch failed: " + t.getMessage());
-        }
-        return false;
     }
 
     private static boolean launchNotificationViaLmoComponent(Context ctx, Object sbn,
@@ -660,7 +634,11 @@ public class MoreBubbleHookModule extends XposedModule {
             // app, so ActivityTaskManager rejects the launch before a task can
             // be created. SystemUI's own remote-action code opts into mode 1;
             // mirror that behavior here so the task-move path has a real task.
-            ActivityOptions pendingIntentOptions = ActivityOptions.makeBasic();
+            // Evolution's LMO implementation owns the Freeform display area;
+            // Android's native launchWindowingMode=5 is ignored on this build.
+            // Launch the exact Intent behind the current task instead, so the
+            // temporary normal task is never shown before LMO reparents it.
+            ActivityOptions pendingIntentOptions = ActivityOptions.makeTaskLaunchBehind();
             setPendingIntentBackgroundStartAllowed(pendingIntentOptions);
             notification.contentIntent.send(pendingIntentOptions.toBundle());
             long launchTime = SystemClock.uptimeMillis();
@@ -678,7 +656,7 @@ public class MoreBubbleHookModule extends XposedModule {
                         userId, taskId, reason);
             }, "MoreBubble-LMO-task-move");
             mover.start();
-            Log.i(TAG, reason + ": launched notification PendingIntent with BAL allowance; "
+            Log.i(TAG, reason + ": staged notification PendingIntent behind current task; "
                     + "moving its task to LMO Freeform");
             return true;
         } catch (PendingIntent.CanceledException e) {
