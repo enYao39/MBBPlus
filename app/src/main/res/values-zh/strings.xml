@@ -63,12 +63,14 @@
     <string name="restart_failed">无法重启启动器和系统界面，请检查 root 权限。</string>
     <string name="debug_logging_title">详细调试日志</string>
     <string name="debug_logging_summary">开启后，模块会将详细事件写入 logcat。关闭时仍会保留警告和错误日志。</string>
+    <string name="debug_fullscreen_intent_title">全屏测试通知提取的 Intent</string>
+    <string name="debug_fullscreen_intent_summary">临时将通知上的 Bubble 按钮改为全屏启动提取出的通知 Intent，覆盖 Bubble/Freeform 打开模式。需同时开启详细调试日志。</string>
     <string name="debug_log_folder_missing">请选择诊断压缩包的保存目录。</string>
     <string name="debug_log_folder_selected">已选择日志保存目录。</string>
     <string name="debug_log_choose_folder">选择保存目录</string>
     <string name="debug_log_folder_saved">日志保存目录已设置。</string>
     <string name="debug_log_folder_failed">无法保留该目录的访问权限，请重新选择。</string>
-    <string name="debug_log_privacy_note">压缩包包含 Android logcat 和内核 dmesg，可能含通知内容、应用活动及设备信息。分享前请先检查。保存时会请求 root 权限。</string>
+    <string name="debug_log_privacy_note">日志会包含完整提取的通知 Intent 及 extras、Android logcat 和内核 dmesg，可能含私密通知与设备数据。保存时会请求 root 权限。</string>
     <string name="debug_log_export_button">保存日志压缩包</string>
     <string name="debug_log_exporting">正在收集并压缩日志…</string>
     <string name="debug_log_export_success">已保存 %1$s</string>

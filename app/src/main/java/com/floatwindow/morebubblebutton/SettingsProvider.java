@@ -55,6 +55,8 @@ public class SettingsProvider extends ContentProvider {
                         ModuleSettings.DEFAULT_SWIPE_HANDLE_BOTTOM_MARGIN_DP));
         add(cursor, ModuleSettings.KEY_DEBUG_LOGGING_ENABLED,
                 prefs.getBoolean(ModuleSettings.KEY_DEBUG_LOGGING_ENABLED, false));
+        add(cursor, ModuleSettings.KEY_DEBUG_FULLSCREEN_NOTIFICATION_BUTTON,
+                prefs.getBoolean(ModuleSettings.KEY_DEBUG_FULLSCREEN_NOTIFICATION_BUTTON, false));
         return cursor;
     }
 

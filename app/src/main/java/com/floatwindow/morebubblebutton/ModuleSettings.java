@@ -26,6 +26,7 @@ public class ModuleSettings {
     public static final String KEY_SWIPE_HANDLE_THICKNESS = "swipe_handle_thickness_dp";
     public static final String KEY_SWIPE_HANDLE_BOTTOM_MARGIN = "swipe_handle_bottom_margin_dp";
     public static final String KEY_DEBUG_LOGGING_ENABLED = "debug_logging_enabled";
+    public static final String KEY_DEBUG_FULLSCREEN_NOTIFICATION_BUTTON = "debug_fullscreen_notification_button";
     public static final String KEY_DEBUG_LOG_FOLDER_URI = "debug_log_folder_uri";
 
     public static final int OPEN_MODE_BUBBLE = 0;
@@ -235,6 +236,14 @@ public class ModuleSettings {
 
     public static void setDebugLoggingEnabled(Context ctx, boolean enabled) {
         getPrefs(ctx).edit().putBoolean(KEY_DEBUG_LOGGING_ENABLED, enabled).apply();
+    }
+
+    public static boolean isDebugFullscreenNotificationButtonEnabled(Context ctx) {
+        return getBoolean(ctx, KEY_DEBUG_FULLSCREEN_NOTIFICATION_BUTTON, false);
+    }
+
+    public static void setDebugFullscreenNotificationButtonEnabled(Context ctx, boolean enabled) {
+        getPrefs(ctx).edit().putBoolean(KEY_DEBUG_FULLSCREEN_NOTIFICATION_BUTTON, enabled).apply();
     }
 
     public static String getDebugLogFolderUri(Context ctx) {
