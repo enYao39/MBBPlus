@@ -4,7 +4,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 
 > Evolution 12.3 是当前主要实机验证基线；Lunaris AOSP 3.12 已针对通知注入路径做过兼容性验证。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
 
-当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.11 (19)`。
+当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.12 (20)`。
 
 ## 功能
 
@@ -95,7 +95,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 | Hook 目标 | 方法 | 作用 |
 |-----------|------|------|
 | `OverviewActionsView` | `onFinishInflate` | 注入底部操作栏按钮 |
-| `OverviewActionsView` | `onClick` | 处理按钮点击 |
+| `OverviewActionsView` | `onClick` | 仅在按钮位于可见的当前 `RecentsView` 时处理点击 |
 | `TaskMenuView` | `addMenuOptions` | 注入任务卡片菜单项 |
 
 最近任务气泡触发通过 `SystemUiProxy.showAppBubble()` 调用 WMShell Bubble 服务。
