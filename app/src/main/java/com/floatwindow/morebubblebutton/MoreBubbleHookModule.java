@@ -2345,7 +2345,8 @@ public class MoreBubbleHookModule extends XposedModule {
                                 controller, null, finalIntent);
                         runOnSysuiMain(bubblesManager, () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
                         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
-                    } else if (expandAppBubbleNewApi(controller, finalIntent, finalUser, entryPoint, pkg, reason)) {
+                    } else if (expandAppBubbleNewApi(controller, finalIntent, finalUser, entryPoint,
+                            pkg, reason, () -> launchNotificationFullscreen(entry, reason))) {
                         // Android 17 (Cinnamon Bun) / EvolutionX: BubbleController no longer exposes
                         // expandStackAndSelectBubble(Intent, UserHandle, EntryPoint, BubbleBarLocation).
                         // Mirror the system's own showAppBubble() implementation: build a TYPE_APP
@@ -2436,9 +2437,11 @@ public class MoreBubbleHookModule extends XposedModule {
      * Constructs a TYPE_APP Bubble exactly like the system's own IBubbles.showAppBubble() handler
      * (BubbleController$IBubblesImpl) and invokes:
      *   BubbleController.expandStackAndSelectAppBubble(Bubble, EntryPoint, UpdateLocationRequest)
+     * The platform app Bubble is keyed per package and does not replace an active Bubble's Intent,
+     * so a new notification route must wait for the existing app Bubble to be removed first.
      */
     private static boolean expandAppBubbleNewApi(Object controller, Intent intent, UserHandle user,
-            Object entryPoint, String pkg, String reason) {
+            Object entryPoint, String pkg, String reason, Runnable fullscreenFallback) {
         try {
             Log.i(TAG, reason + ": using TYPE_APP bubble API for " + pkg
                     + " target=" + summarizeIntent(intent));
@@ -2451,6 +2454,11 @@ public class MoreBubbleHookModule extends XposedModule {
             Context context = (Context) getFieldSystemUi(controller, "mContext");
             logDetailedInfo(context, reason + ": TYPE_APP identity package=" + pkg
                     + " bubbleKey=" + key + " user=" + user);
+            ControllerBubbleIntentResult existingBubble = readControllerAppBubbleIntent(controller, key);
+            boolean replaceExistingBubble = existingBubble.intent != null;
+            logDetailedInfo(context, reason + ": TYPE_APP existing bubble result="
+                    + existingBubble.status + " intentSource=" + existingBubble.intentGetter
+                    + " replaceBeforeLaunch=" + replaceExistingBubble);
             android.graphics.drawable.Icon icon = buildAppBubbleIcon(controller, intent, pkg);
             Object bubble = null;
             // Evolution's Android 17 build has a five-argument constructor,
@@ -2495,6 +2503,7 @@ public class MoreBubbleHookModule extends XposedModule {
                 Log.w(TAG, reason + ": compatible app Bubble constructor not found");
                 return false;
             }
+            final Object bubbleToSubmit = bubble;
 
             Method expandApp = null;
             for (Method m : controller.getClass().getDeclaredMethods()) {
@@ -2510,17 +2519,54 @@ public class MoreBubbleHookModule extends XposedModule {
                 Log.w(TAG, reason + ": app bubble expand method not found (new api)");
                 return false;
             }
-            if (expandApp.getParameterCount() == 2) {
-                expandApp.invoke(controller, bubble, entryPoint);
+            final Method expandAppMethod = expandApp;
+            Runnable submitBubble = () -> {
+                try {
+                    if (expandAppMethod.getParameterCount() == 2) {
+                        expandAppMethod.invoke(controller, bubbleToSubmit, entryPoint);
+                    } else {
+                        expandAppMethod.invoke(controller, bubbleToSubmit, entryPoint, null);
+                    }
+                    logDetailedInfo(context, reason + ": submitted TYPE_APP Bubble"
+                            + " package=" + pkg + " entryPoint=" + entryPoint
+                            + " intent=" + summarizeIntent(intent));
+                    Log.i(TAG, reason + ": expanded app bubble via expandStackAndSelectAppBubble for " + pkg);
+                    scheduleBubbleTaskSnapshots(context, pkg, reason, "TYPE_APP",
+                            controller, key, intent);
+                } catch (Throwable t) {
+                    Log.w(TAG, reason + ": app bubble submit failed: " + t.getMessage());
+                    if (fullscreenFallback != null) fullscreenFallback.run();
+                }
+            };
+
+            if (replaceExistingBubble) {
+                Method dismissBubble = findMethodSystemUi(controller.getClass(), "dismissBubble",
+                        String.class, int.class);
+                if (dismissBubble == null) {
+                    Log.w(TAG, reason + ": cannot replace existing app Bubble; dismiss method unavailable");
+                    return false;
+                }
+                dismissBubble.invoke(controller, key, 1 /* DISMISS_USER_GESTURE */);
+                logDetailedInfo(context, reason + ": dismissed existing TYPE_APP Bubble before routing new intent");
+                Handler handler = new Handler(Looper.getMainLooper());
+                int[] attempts = {0};
+                Runnable[] waitForRemoval = new Runnable[1];
+                waitForRemoval[0] = () -> {
+                    ControllerBubbleIntentResult current = readControllerAppBubbleIntent(controller, key);
+                    if (current.intent == null) {
+                        logDetailedInfo(context, reason + ": previous TYPE_APP Bubble removed; submitting new route");
+                        submitBubble.run();
+                    } else if (++attempts[0] < 30) {
+                        handler.postDelayed(waitForRemoval[0], 100L);
+                    } else {
+                        Log.w(TAG, reason + ": previous TYPE_APP Bubble did not clear; using fullscreen fallback");
+                        if (fullscreenFallback != null) fullscreenFallback.run();
+                    }
+                };
+                handler.postDelayed(waitForRemoval[0], 100L);
             } else {
-                expandApp.invoke(controller, bubble, entryPoint, null);
+                submitBubble.run();
             }
-            logDetailedInfo(context, reason + ": submitted TYPE_APP Bubble"
-                    + " package=" + pkg + " entryPoint=" + entryPoint
-                    + " intent=" + summarizeIntent(intent));
-            Log.i(TAG, reason + ": expanded app bubble via expandStackAndSelectAppBubble for " + pkg);
-            scheduleBubbleTaskSnapshots(context, pkg, reason, "TYPE_APP",
-                    controller, key, intent);
             return true;
         } catch (Throwable t) {
             Log.w(TAG, reason + ": app bubble new api failed: " + t.getMessage());
