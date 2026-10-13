@@ -4,7 +4,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 
 > Evolution 12.3 是当前主要实机验证基线；Lunaris AOSP 3.12 已针对通知注入路径做过兼容性验证。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
 
-当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.13 (21)`。
+当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.14 (22)`。
 
 ## 功能
 
@@ -81,7 +81,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 | 横条长度 | Heads-up 横条长度 | 56dp |
 | 横条粗细 | Heads-up 横条粗细 | 7dp |
 | 横条距底部 | 横条相对通知底部的位置，支持 `-10dp..24dp` | 3dp |
-| 按钮位置 | 跟随原按钮 / 第二行 | 跟随原按钮 |
+| 按钮位置 | 位于 Recents 设置卡中；仅开启底部操作栏时展开 | 跟随原按钮 |
 | X 轴 | 水平位置，支持滑杆和 `+` / `−` 精调 | 50% |
 | Y 轴 | 垂直位置，支持滑杆和 `+` / `−` 精调 | 50% |
 | 重启启动器 + 系统界面 | 通过 root 重启 Pixel Launcher / SystemUI 使设置生效 | - |

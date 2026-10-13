@@ -40,6 +40,8 @@
 6. 文案统一使用 “Bubble”，不要重新引入 “Message Bubble”。
 7. 没有 root 时不能把“手动重启 SystemUI”当作模块功能；只能提示用户使用设备支持的重载方式。
 
+Recents 设置中的 Button position 控件嵌在 Bottom action bar 设置项下方，只在底部操作栏开启时展示。
+
 ## Evolution/LMO Freeform 适配
 
 Evolution 衍生系统可能不暴露传统的 `FEATURE_FREEFORM_WINDOW_MANAGEMENT` 或 `enable_freeform_support`，但仍提供 LMO Freeform 服务。当前实现按公开 LMOFreeform 源码适配：
