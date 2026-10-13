@@ -2131,10 +2131,7 @@ public class MoreBubbleHookModule extends XposedModule {
             if (targetIntent.getPackage() == null) {
                 targetIntent.setPackage(pkg);
             }
-            // Keep the notification Bubble in a task separate from an existing fullscreen app task.
-            // RESET_TASK_IF_NEEDED lets Android reuse that task, which can make the Bubble display
-            // the conversation opened by a previous fullscreen notification instead of this target.
-            targetIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+            targetIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
             Object entryPoint = findEntryPoint(controller.getClass().getClassLoader(), "NOTIFICATION");
             final Intent finalIntent = targetIntent;
             final UserHandle finalUser = user;
