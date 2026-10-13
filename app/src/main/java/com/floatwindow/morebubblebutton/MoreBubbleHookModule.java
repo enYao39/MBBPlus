@@ -25,7 +25,10 @@ import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.Space;
 import android.widget.Toast;
 
 import java.lang.reflect.Method;
@@ -43,7 +46,6 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam;
 
 public class MoreBubbleHookModule extends XposedModule {
     private static final String TAG = "MoreBubbleModule";
-    private View bubbleButton;
     private static View sSecondRow;
     private ClassLoader mLauncherClassLoader;
     private static Object sBubblesManager;
@@ -2615,8 +2617,8 @@ public class MoreBubbleHookModule extends XposedModule {
             hook(cl.loadClass("com.android.quickstep.views.OverviewActionsView")
                     .getMethod("onClick", View.class)).intercept(chain -> {
                 View v = (View) chain.getArg(0);
-                if (v != null && v == bubbleButton) {
-                    onBubbleButtonClick(v);
+                if (isBottomActionButton(v)) {
+                    onBottomActionClick(v, "freeform_button".equals(v.getTag()));
                     return null;
                 }
                 return chain.proceed();
@@ -2646,14 +2648,156 @@ public class MoreBubbleHookModule extends XposedModule {
         android.content.res.Resources res = ctx.getResources();
         String pkg = ctx.getPackageName();
         ViewGroup actionsParent = (ViewGroup) actionsView;
-
-        Button btn = createBubbleButton(ctx, res, pkg);
+        boolean showBubble = ModuleSettings.isActionBarBubbleEnabled(ctx);
+        boolean showFreeform = ModuleSettings.isActionBarFreeformEnabled(ctx);
+        boolean freeformFirst = ModuleSettings.getActionBarOrder(ctx) == 0;
         int positionMode = ModuleSettings.getPositionMode(ctx);
-        if (positionMode == 0) {
-            addToActionButtons(actionsParent, btn, res, pkg);
-        } else {
-            ensureSecondRow(actionsParent, btn, res, pkg);
+
+        int nativeRowId = res.getIdentifier(
+                "second_overview_actions_container", "id", pkg);
+        View nativeSecondRow = nativeRowId != 0
+                ? actionsParent.findViewById(nativeRowId) : null;
+        if (positionMode == 1 && nativeSecondRow instanceof ViewGroup) {
+            removeSecondRowActions();
+            if (freeformFirst) {
+                if (showFreeform) addToNativeActionRow(ctx, (ViewGroup) nativeSecondRow,
+                        res, pkg, true);
+                if (showBubble) addToNativeActionRow(ctx, (ViewGroup) nativeSecondRow,
+                        res, pkg, false);
+            } else {
+                if (showBubble) addToNativeActionRow(ctx, (ViewGroup) nativeSecondRow,
+                        res, pkg, false);
+                if (showFreeform) addToNativeActionRow(ctx, (ViewGroup) nativeSecondRow,
+                        res, pkg, true);
+            }
+            Log.i(TAG, "Second-row mode: using host native icon-only action row");
+            return;
         }
+
+        if (positionMode == 0) removeSecondRowActions();
+        boolean[] order = freeformFirst ? new boolean[]{true, false}
+                : new boolean[]{false, true};
+        for (boolean freeform : order) {
+            if ((freeform && !showFreeform) || (!freeform && !showBubble)) continue;
+            Button btn = createBottomActionButton(ctx, res, pkg, freeform);
+            if (positionMode == 0) addToActionButtons(actionsParent, btn, res, pkg);
+            else ensureSecondRow(actionsParent, btn, res, pkg);
+        }
+    }
+
+    @SuppressLint("DiscouragedApi")
+    private void addToNativeActionRow(Context ctx, ViewGroup row,
+            android.content.res.Resources res, String pkg, boolean freeform) {
+        String tag = freeform ? "freeform_button" : "bubble_button";
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View child = row.getChildAt(i);
+            if (tag.equals(child.getTag())) return;
+        }
+
+        View sampleButton = findNativeActionSample(row, res, pkg);
+        ImageButton button = createNativeActionButton(ctx, res, pkg, freeform, sampleButton);
+        int spacerWidth = getNativeActionSpacerWidth(row, res, pkg);
+        Space spacer = new Space(ctx);
+        spacer.setTag(tag + "_spacing");
+        spacer.setLayoutParams(new LinearLayout.LayoutParams(spacerWidth,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        int insertionIndex = row.getChildCount();
+        int endSpaceId = res.getIdentifier("end_space", "id", pkg);
+        View endSpace = endSpaceId != 0 ? row.findViewById(endSpaceId) : null;
+        if (endSpace != null) insertionIndex = row.indexOfChild(endSpace);
+        row.addView(spacer, insertionIndex++);
+        row.addView(button, insertionIndex);
+    }
+
+    @SuppressLint("DiscouragedApi")
+    private View findNativeActionSample(ViewGroup row,
+            android.content.res.Resources res, String pkg) {
+        String[] ids = {"action_screenshot", "action_split", "action_lens"};
+        for (String name : ids) {
+            int id = res.getIdentifier(name, "id", pkg);
+            View candidate = id != 0 ? row.findViewById(id) : null;
+            if (candidate instanceof ImageButton) return candidate;
+        }
+        return null;
+    }
+
+    @SuppressLint("DiscouragedApi")
+    private int getNativeActionSpacerWidth(ViewGroup row,
+            android.content.res.Resources res, String pkg) {
+        String[] ids = {"action_screenshot_space", "action_split_space", "action_lens_space"};
+        for (String name : ids) {
+            int id = res.getIdentifier(name, "id", pkg);
+            View space = id != 0 ? row.findViewById(id) : null;
+            if (space != null && space.getLayoutParams() != null
+                    && space.getLayoutParams().width > 0) {
+                return space.getLayoutParams().width;
+            }
+        }
+        return (int) (24 * ctxDensity(row.getContext()) + 0.5f);
+    }
+
+    private ImageButton createNativeActionButton(Context ctx,
+            android.content.res.Resources res, String pkg, boolean freeform, View sample) {
+        int styleId = res.getIdentifier("OverviewActionButton", "style", pkg);
+        ImageButton button = styleId != 0
+                ? new ImageButton(ctx, null, 0, styleId) : new ImageButton(ctx);
+        android.graphics.drawable.Drawable icon = freeform
+                ? getFreeformActionIcon(ctx, res, pkg) : getBubbleActionIcon(ctx, res, pkg);
+        button.setImageDrawable(icon);
+        if (sample instanceof ImageView) {
+            ImageView imageSample = (ImageView) sample;
+            button.setImageTintList(imageSample.getImageTintList());
+            button.setScaleType(imageSample.getScaleType());
+            button.setPadding(sample.getPaddingLeft(), sample.getPaddingTop(),
+                    sample.getPaddingRight(), sample.getPaddingBottom());
+            android.graphics.drawable.Drawable background = sample.getBackground();
+            if (background != null && background.getConstantState() != null) {
+                button.setBackground(background.getConstantState().newDrawable(
+                        res, ctx.getTheme()).mutate());
+            }
+            button.setBackgroundTintList(sample.getBackgroundTintList());
+            ViewGroup.LayoutParams sampleParams = sample.getLayoutParams();
+            if (sampleParams != null) {
+                button.setLayoutParams(new LinearLayout.LayoutParams(
+                        sampleParams.width, sampleParams.height));
+            }
+        } else {
+            button.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        String label = freeform ? getFreeformLabel(ctx) : getBubbleButtonLabel(ctx);
+        button.setContentDescription(label);
+        button.setTooltipText(label);
+        button.setTag(freeform ? "freeform_button" : "bubble_button");
+        button.setOnClickListener(v -> onBottomActionClick(v, freeform));
+        return button;
+    }
+
+    private static float ctxDensity(Context ctx) {
+        return ctx.getResources().getDisplayMetrics().density;
+    }
+
+    private static boolean isBottomActionButton(View view) {
+        if (view == null || view.getTag() == null) return false;
+        String tag = view.getTag().toString();
+        return "bubble_button".equals(tag) || "freeform_button".equals(tag);
+    }
+
+    private void removeSecondRowActions() {
+        if (sSecondRow == null) return;
+        ViewGroup parent = sSecondRow.getParent() instanceof ViewGroup
+                ? (ViewGroup) sSecondRow.getParent() : null;
+        if (parent == null) {
+            sSecondRow = null;
+            return;
+        }
+        ViewGroup row = (ViewGroup) sSecondRow;
+        for (int i = row.getChildCount() - 1; i >= 0; i--) {
+            if (isBottomActionButton(row.getChildAt(i))) row.removeViewAt(i);
+        }
+        if (row.getChildCount() == 0) parent.removeView(row);
+        sSecondRow = null;
     }
 
     /**
@@ -2711,13 +2855,7 @@ public class MoreBubbleHookModule extends XposedModule {
     private void addToActionButtons(ViewGroup actionsParent, Button btn,
             android.content.res.Resources res, String pkg) {
         // 如果之前在第二行，先移除
-        if (sSecondRow != null) {
-            if (bubbleButton != null) ((ViewGroup) sSecondRow).removeView(bubbleButton);
-            if (((ViewGroup) sSecondRow).getChildCount() == 0) {
-                actionsParent.removeView(sSecondRow);
-            }
-            sSecondRow = null;
-        }
+        if (sSecondRow != null) removeSecondRowActions();
 
         int abId = res.getIdentifier("action_buttons", "id", pkg);
         LinearLayout actionButtons = (LinearLayout) actionsParent.findViewById(abId);
@@ -2726,10 +2864,7 @@ public class MoreBubbleHookModule extends XposedModule {
         // 去重
         for (int i = 0; i < actionButtons.getChildCount(); i++) {
             View child = actionButtons.getChildAt(i);
-            if (child.getTag() != null && "bubble_button".equals(child.getTag().toString())) {
-                bubbleButton = child;
-                return;
-            }
+            if (child.getTag() != null && child.getTag().equals(btn.getTag())) return;
         }
 
         // 添加到末尾
@@ -2739,9 +2874,8 @@ public class MoreBubbleHookModule extends XposedModule {
         if (spId != 0) mlp.setMarginStart(res.getDimensionPixelSize(spId));
         btn.setLayoutParams(mlp);
         actionButtons.addView(btn);
-        bubbleButton = btn;
 
-        Log.i(TAG, "Bubble button added to action_buttons (follow mode)");
+        Log.i(TAG, btn.getTag() + " added to action_buttons (follow mode)");
     }
 
     private boolean isClearAllButton(View child) {
@@ -2750,23 +2884,32 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     @SuppressLint("DiscouragedApi")
-    private Button createBubbleButton(Context ctx, android.content.res.Resources res, String pkg) {
+    private Button createBottomActionButton(Context ctx, android.content.res.Resources res,
+            String pkg, boolean freeform) {
         int styleId = res.getIdentifier("OverviewActionButton.Blur", "style", pkg);
         if (styleId == 0) styleId = res.getIdentifier("OverviewActionButton", "style", pkg);
         Button btn = (styleId != 0) ? new Button(ctx, null, 0, styleId) : new Button(ctx);
-        String label = getConfiguredOpenLabel(ctx);
+        String label = freeform ? getFreeformLabel(ctx) : getBubbleButtonLabel(ctx);
         btn.setText(label);
         btn.setContentDescription(label);
         btn.setTooltipText(label);
         btn.setId(View.generateViewId());
-        btn.setTag("bubble_button");
+        btn.setTag(freeform ? "freeform_button" : "bubble_button");
 
         // 图标
-        android.graphics.drawable.Drawable icon = getConfiguredActionIcon(ctx, res, pkg);
+        android.graphics.drawable.Drawable icon = freeform
+                ? getFreeformActionIcon(ctx, res, pkg) : getBubbleActionIcon(ctx, res, pkg);
         if (icon != null) btn.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
 
-        btn.setOnClickListener(this::onBubbleButtonClick);
+        btn.setOnClickListener(v -> onBottomActionClick(v, freeform));
         return btn;
+    }
+
+    private android.graphics.drawable.Drawable getBubbleActionIcon(Context ctx,
+            android.content.res.Resources hostResources, String hostPackage) {
+        int iconId = hostResources.getIdentifier("ic_bubble_button", "drawable", hostPackage);
+        if (iconId == 0) iconId = hostResources.getIdentifier("ic_bubble_bar", "drawable", hostPackage);
+        return iconId != 0 ? hostResources.getDrawable(iconId, ctx.getTheme()) : null;
     }
 
     private android.graphics.drawable.Drawable getConfiguredActionIcon(
@@ -2776,10 +2919,7 @@ public class MoreBubbleHookModule extends XposedModule {
                     ctx, hostResources, hostPackage);
             if (icon != null) return icon;
         }
-        int iconId = hostResources.getIdentifier("ic_bubble_button", "drawable", hostPackage);
-        if (iconId == 0) iconId = hostResources.getIdentifier("ic_bubble_bar", "drawable", hostPackage);
-        if (iconId != 0) return hostResources.getDrawable(iconId, ctx.getTheme());
-        return null;
+        return getBubbleActionIcon(ctx, hostResources, hostPackage);
     }
 
     private static android.graphics.drawable.Drawable getFreeformActionIcon(
@@ -2835,11 +2975,8 @@ public class MoreBubbleHookModule extends XposedModule {
 
         if (sSecondRow != null && sSecondRow.getParent() == actionsParent) {
             for (int i = 0; i < ((ViewGroup) sSecondRow).getChildCount(); i++) {
-                if (((ViewGroup) sSecondRow).getChildAt(i).getTag() != null
-                        && "bubble_button".equals(((ViewGroup) sSecondRow).getChildAt(i).getTag().toString())) {
-                    bubbleButton = ((ViewGroup) sSecondRow).getChildAt(i);
-                    return;
-                }
+                View child = ((ViewGroup) sSecondRow).getChildAt(i);
+                if (child.getTag() != null && child.getTag().equals(btn.getTag())) return;
             }
             ViewGroup.MarginLayoutParams mlp = new ViewGroup.MarginLayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -2847,7 +2984,6 @@ public class MoreBubbleHookModule extends XposedModule {
             if (spId != 0) mlp.setMarginStart(res.getDimensionPixelSize(spId));
             btn.setLayoutParams(mlp);
             ((ViewGroup) sSecondRow).addView(btn);
-            bubbleButton = btn;
             return;
         }
 
@@ -2869,7 +3005,6 @@ public class MoreBubbleHookModule extends XposedModule {
         if (spId != 0) btnMlp.setMarginStart(res.getDimensionPixelSize(spId));
         btn.setLayoutParams(btnMlp);
         newSecondRow.addView(btn);
-        bubbleButton = btn;
 
         // 定位：用 layout_gravity=START|BOTTOM + marginStart 实现所有位置
         FrameLayout.LayoutParams rowLp = new FrameLayout.LayoutParams(
@@ -2997,14 +3132,14 @@ public class MoreBubbleHookModule extends XposedModule {
 
     // ==================== 气泡触发 ====================
 
-    private void onBubbleButtonClick(View actionsView) {
-        Object rv = findVisibleRecentsView(actionsView);
-        if (rv == null || !isActionBarInVisibleRecents(actionsView, rv)) {
+    private void onBottomActionClick(View actionView, boolean freeform) {
+        Object rv = findVisibleRecentsView(actionView);
+        if (rv == null || !isActionBarInVisibleRecents(actionView, rv)) {
             Log.i(TAG, "Ignore bottom action bar click outside visible RecentsView");
             return;
         }
 
-        Context ctx = actionsView.getContext();
+        Context ctx = actionView.getContext();
         try {
             Object tv = findMethod(rv.getClass(), "getCurrentPageTaskView").invoke(rv);
             if (tv == null) return;
@@ -3017,12 +3152,15 @@ public class MoreBubbleHookModule extends XposedModule {
             int userId = getField(key, "userId") != null ? (int) getField(key, "userId") : 0;
             if (intent == null) return;
 
-            if (openTaskFromRecents(ctx, intent, task, userId)) {
+            if (openTaskFromRecents(ctx, intent, task, userId, freeform)) {
                 Object recentsView = rv;
                 new android.os.Handler(Looper.getMainLooper()).postDelayed(
                         () -> dismissOverview(ctx, recentsView), 200);
             }
-        } catch (Throwable t) { Log.e(TAG, "onBubbleButtonClick: " + t.getMessage()); }
+        } catch (Throwable t) {
+            Log.e(TAG, (freeform ? "Freeform" : "Bubble") + " bottom action click: "
+                    + t.getMessage());
+        }
     }
 
     private Object findVisibleRecentsView(View view) {
@@ -3071,7 +3209,12 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private boolean openTaskFromRecents(Context ctx, Intent intent, Object task, int userId) {
-        if (isFreeformOpenMode(ctx)) {
+        return openTaskFromRecents(ctx, intent, task, userId, isFreeformOpenMode(ctx));
+    }
+
+    private boolean openTaskFromRecents(Context ctx, Intent intent, Object task, int userId,
+            boolean preferFreeform) {
+        if (preferFreeform) {
             if (isFreeformSupported(ctx) && startTaskInFreeform(task, ctx)) {
                 Log.i(TAG, "Opened recents task in freeform");
                 return true;

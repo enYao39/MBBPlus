@@ -23,6 +23,12 @@ public class SettingsProvider extends ContentProvider {
         MatrixCursor cursor = new MatrixCursor(new String[]{"key", "value"});
         add(cursor, ModuleSettings.KEY_MENU_ENABLED, prefs.getBoolean(ModuleSettings.KEY_MENU_ENABLED, true));
         add(cursor, ModuleSettings.KEY_ACTION_BAR_ENABLED, prefs.getBoolean(ModuleSettings.KEY_ACTION_BAR_ENABLED, true));
+        add(cursor, ModuleSettings.KEY_ACTION_BAR_BUBBLE_ENABLED,
+                prefs.getBoolean(ModuleSettings.KEY_ACTION_BAR_BUBBLE_ENABLED, true));
+        add(cursor, ModuleSettings.KEY_ACTION_BAR_FREEFORM_ENABLED,
+                prefs.getBoolean(ModuleSettings.KEY_ACTION_BAR_FREEFORM_ENABLED, true));
+        add(cursor, ModuleSettings.KEY_ACTION_BAR_ORDER,
+                prefs.getInt(ModuleSettings.KEY_ACTION_BAR_ORDER, 0));
         add(cursor, ModuleSettings.KEY_POSITION_MODE, prefs.getInt(ModuleSettings.KEY_POSITION_MODE, 0));
         add(cursor, ModuleSettings.KEY_POS_X, prefs.getInt(ModuleSettings.KEY_POS_X, 50));
         add(cursor, ModuleSettings.KEY_POS_Y, prefs.getInt(ModuleSettings.KEY_POS_Y, 50));

@@ -12,6 +12,9 @@ public class ModuleSettings {
     public static final String PREFS_NAME = "morebubblebutton_settings";
     public static final String KEY_MENU_ENABLED = "menu_enabled";
     public static final String KEY_ACTION_BAR_ENABLED = "action_bar_enabled";
+    public static final String KEY_ACTION_BAR_BUBBLE_ENABLED = "action_bar_bubble_enabled";
+    public static final String KEY_ACTION_BAR_FREEFORM_ENABLED = "action_bar_freeform_enabled";
+    public static final String KEY_ACTION_BAR_ORDER = "action_bar_order";
     public static final String KEY_POSITION_MODE = "position_mode"; // 0=跟随原按钮 1=第二行
     public static final String KEY_POS_X = "pos_x"; // 0-100, 50=居中
     public static final String KEY_POS_Y = "pos_y"; // 0-100, 50=居中
@@ -99,6 +102,28 @@ public class ModuleSettings {
     }
     public static void setActionBarEnabled(Context ctx, boolean v) {
         getPrefs(ctx).edit().putBoolean(KEY_ACTION_BAR_ENABLED, v).apply();
+    }
+
+    public static boolean isActionBarBubbleEnabled(Context ctx) {
+        return getBoolean(ctx, KEY_ACTION_BAR_BUBBLE_ENABLED, true);
+    }
+    public static void setActionBarBubbleEnabled(Context ctx, boolean v) {
+        getPrefs(ctx).edit().putBoolean(KEY_ACTION_BAR_BUBBLE_ENABLED, v).apply();
+    }
+
+    public static boolean isActionBarFreeformEnabled(Context ctx) {
+        return getBoolean(ctx, KEY_ACTION_BAR_FREEFORM_ENABLED, true);
+    }
+    public static void setActionBarFreeformEnabled(Context ctx, boolean v) {
+        getPrefs(ctx).edit().putBoolean(KEY_ACTION_BAR_FREEFORM_ENABLED, v).apply();
+    }
+
+    /** 0=Freeform first, 1=Bubble first. */
+    public static int getActionBarOrder(Context ctx) {
+        return getInt(ctx, KEY_ACTION_BAR_ORDER, 0) == 1 ? 1 : 0;
+    }
+    public static void setActionBarOrder(Context ctx, int value) {
+        getPrefs(ctx).edit().putInt(KEY_ACTION_BAR_ORDER, value == 1 ? 1 : 0).apply();
     }
 
     /** 0=跟随原按钮  1=第二行 */
