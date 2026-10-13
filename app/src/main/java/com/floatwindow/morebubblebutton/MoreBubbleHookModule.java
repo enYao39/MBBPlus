@@ -2535,6 +2535,15 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             return result.append('}').toString();
         }
+        // Binary notification payloads are common (for example, Mi Push extras).
+        // Expanding byte[] through reflection boxes every byte and bloats a single
+        // Intent dump into hundreds of logcat records. Base64 preserves every byte
+        // while keeping the output compact and reversible.
+        if (value instanceof byte[]) {
+            byte[] bytes = (byte[]) value;
+            return "byte[" + bytes.length + "] base64="
+                    + java.util.Base64.getEncoder().encodeToString(bytes);
+        }
         if (value instanceof android.os.Bundle) {
             android.os.Bundle bundle = (android.os.Bundle) value;
             StringBuilder result = new StringBuilder("Bundle{");
