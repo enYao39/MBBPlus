@@ -2,6 +2,7 @@ package com.floatwindow.morebubblebutton;
 
 import android.app.Notification;
 import android.app.ActivityOptions;
+import android.app.ActivityManager;
 import android.app.PendingIntent;
 import android.annotation.SuppressLint;
 import android.content.ComponentName;
@@ -13,6 +14,7 @@ import android.graphics.Paint;
 import android.graphics.Rect;
 import android.net.Uri;
 import android.os.IBinder;
+import android.os.Handler;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.SystemClock;
@@ -2102,6 +2104,8 @@ public class MoreBubbleHookModule extends XposedModule {
             if (controller == null || pkg == null) return false;
             Notification notif = (Notification) invokeSystemUi(sbn, "getNotification");
             Context ctx = (Context) getFieldSystemUi(controller, "mContext");
+            logDetailedInfo(ctx, reason + ": Bubble route requested package=" + pkg
+                    + " openMode=" + (isFreeformOpenMode(ctx) ? "freeform" : "bubble"));
             if (isFreeformOpenMode(ctx)) {
                 boolean launched = launchNotificationInFreeform(ctx, entry, reason);
                 if (launched) {
@@ -2114,7 +2118,7 @@ public class MoreBubbleHookModule extends XposedModule {
             Intent launchIntent = ctx != null ? ctx.getPackageManager().getLaunchIntentForPackage(pkg) : null;
             boolean usingLaunchFallback = targetIntent == null;
             if (targetIntent == null) targetIntent = launchIntent;
-            Log.i(TAG, reason + ": Bubble notification route pkg=" + pkg
+            logDetailedInfo(ctx, reason + ": Bubble notification route pkg=" + pkg
                     + " creator=" + (notif != null && notif.contentIntent != null
                     ? safePendingIntentCreator(notif.contentIntent) : "none")
                     + " launchFallback=" + usingLaunchFallback
@@ -2131,6 +2135,10 @@ public class MoreBubbleHookModule extends XposedModule {
             Object entryPoint = findEntryPoint(controller.getClass().getClassLoader(), "NOTIFICATION");
             final Intent finalIntent = targetIntent;
             final UserHandle finalUser = user;
+            logDetailedInfo(ctx, reason + ": Bubble launch prepared package=" + pkg
+                    + " launchFallback=" + usingLaunchFallback
+                    + " entryPoint=" + entryPoint
+                    + " intent=" + summarizeIntent(finalIntent));
             Runnable work = () -> {
                 try {
                     Class<?> bubbleBarLocCls = clOrNull(controller.getClass().getClassLoader(),
@@ -2153,6 +2161,7 @@ public class MoreBubbleHookModule extends XposedModule {
                         expand.invoke(controller, finalIntent, finalUser, entryPoint, null);
                         Log.i(TAG, reason + ": expanded app bubble through legacy API for "
                                 + pkg + " target=" + summarizeIntent(finalIntent));
+                        scheduleBubbleTaskSnapshots(ctx, pkg, reason, "legacy");
                         runOnSysuiMain(bubblesManager, () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
                         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
                     } else if (expandAppBubbleNewApi(controller, finalIntent, finalUser, entryPoint, pkg, reason)) {
@@ -2160,6 +2169,7 @@ public class MoreBubbleHookModule extends XposedModule {
                         // expandStackAndSelectBubble(Intent, UserHandle, EntryPoint, BubbleBarLocation).
                         // Mirror the system's own showAppBubble() implementation: build a TYPE_APP
                         // Bubble and hand it to expandStackAndSelectAppBubble(Bubble, EntryPoint, ...).
+                        scheduleBubbleTaskSnapshots(ctx, pkg, reason, "TYPE_APP");
                         runOnSysuiMain(bubblesManager, () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
                         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
                     } else {
@@ -2203,7 +2213,8 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             if (intent.getPackage() == null && packageName != null) intent.setPackage(packageName);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-            logFullIntent(reason + ": launching fullscreen extracted notification Intent", intent);
+            logDetailedInfo(context, reason + ": launching extracted notification Intent "
+                    + summarizeIntent(intent));
             try {
                 int userId = 0;
                 try { userId = (int) sbn.getClass().getMethod("getUserId").invoke(sbn); }
@@ -2321,6 +2332,10 @@ public class MoreBubbleHookModule extends XposedModule {
             } else {
                 expandApp.invoke(controller, bubble, entryPoint, null);
             }
+            Context context = (Context) getFieldSystemUi(controller, "mContext");
+            logDetailedInfo(context, reason + ": submitted TYPE_APP Bubble"
+                    + " package=" + pkg + " entryPoint=" + entryPoint
+                    + " intent=" + summarizeIntent(intent));
             Log.i(TAG, reason + ": expanded app bubble via expandStackAndSelectAppBubble for " + pkg);
             return true;
         } catch (Throwable t) {
@@ -2383,7 +2398,6 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             Log.i(TAG, "Notification target Intent extracted: creator="
                     + safePendingIntentCreator(pi) + " target=" + summarizeIntent(copy));
-            logFullIntent("Notification target Intent extracted (including extras)", copy);
             return copy;
         } catch (Throwable t) {
             Log.w(TAG, "notification target intent: " + t.getMessage());
@@ -2391,10 +2405,94 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
+    private static boolean isDebugLoggingEnabled(Context context) {
+        try {
+            return context != null && ModuleSettings.isDebugLoggingEnabled(context);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Emit detailed diagnostics using the same host context as the setting check. */
+    private static void logDetailedInfo(Context context, String message) {
+        if (isDebugLoggingEnabled(context)) {
+            android.util.Log.i(TAG, message);
+        }
+    }
+
+    /** Schedule task snapshots only when detailed logging is enabled. */
+    private static void scheduleBubbleTaskSnapshots(Context context, String packageName,
+            String reason, String api) {
+        if (!isDebugLoggingEnabled(context) || packageName == null) return;
+        Handler handler = new Handler(Looper.getMainLooper());
+        long[] delaysMs = {300L, 1200L, 2800L};
+        for (long delayMs : delaysMs) {
+            handler.postDelayed(() -> {
+                if (!isDebugLoggingEnabled(context)) return;
+                try {
+                    ActivityManager activityManager = (ActivityManager)
+                            context.getSystemService(Context.ACTIVITY_SERVICE);
+                    List<ActivityManager.RunningTaskInfo> tasks = activityManager != null
+                            ? activityManager.getRunningTasks(50) : null;
+                    if (tasks == null) {
+                        logDetailedInfo(context, reason + ": Bubble task snapshot api=" + api
+                                + " elapsedMs=" + delayMs
+                                + " result=task-query-unavailable");
+                        return;
+                    }
+                    int matches = 0;
+                    for (ActivityManager.RunningTaskInfo task : tasks) {
+                        ComponentName top = task.topActivity;
+                        ComponentName base = task.baseActivity;
+                        if (!packageName.equals(top != null ? top.getPackageName() : null)
+                                && !packageName.equals(base != null ? base.getPackageName() : null)) {
+                            continue;
+                        }
+                        matches++;
+                        int windowingMode = 0;
+                        int displayId = -1;
+                        try {
+                            Object configuration = getFieldSystemUi(task, "configuration");
+                            Object windowConfiguration = configuration != null
+                                    ? invokeSystemUi(configuration, "getWindowConfiguration") : null;
+                            Object mode = windowConfiguration != null
+                                    ? invokeSystemUi(windowConfiguration, "getWindowingMode") : null;
+                            if (mode instanceof Number) windowingMode = ((Number) mode).intValue();
+                        } catch (Throwable ignored) {}
+                        try {
+                            Object id = getFieldSystemUi(task, "displayId");
+                            if (id instanceof Number) displayId = ((Number) id).intValue();
+                        } catch (Throwable ignored) {}
+                        logDetailedInfo(context, reason + ": Bubble task snapshot api=" + api
+                                + " elapsedMs=" + delayMs + " taskId=" + task.taskId
+                                + " displayId=" + displayId
+                                + " windowingMode=" + windowingMode
+                                + " top=" + flattenComponent(top)
+                                + " base=" + flattenComponent(base)
+                                + " baseIntent=" + summarizeIntent(task.baseIntent));
+                    }
+                    if (matches == 0) {
+                        logDetailedInfo(context, reason + ": Bubble task snapshot api=" + api
+                                + " elapsedMs=" + delayMs + " package=" + packageName
+                                + " result=no matching running task");
+                    }
+                } catch (Throwable t) {
+                    logDetailedInfo(context, reason + ": Bubble task snapshot api=" + api
+                            + " elapsedMs=" + delayMs + " failed=" + t.getClass().getSimpleName()
+                            + ": " + t.getMessage());
+                }
+            }, delayMs);
+        }
+    }
+
+    private static String flattenComponent(ComponentName component) {
+        return component != null ? component.flattenToShortString() : "none";
+    }
+
     private static String safePendingIntentCreator(PendingIntent pendingIntent) {
         if (pendingIntent == null) return "none";
         try {
-            return pendingIntent.getCreatorPackage() + "/uid=" + pendingIntent.getCreatorUid();
+            return pendingIntent.getCreatorPackage();
         } catch (Throwable ignored) {
             return "unknown";
         }
@@ -2410,22 +2508,14 @@ public class MoreBubbleHookModule extends XposedModule {
             String dataOrigin = data == null ? "none"
                     : String.valueOf(data.getScheme()) + "://" + String.valueOf(data.getHost());
             Set<String> categories = intent.getCategories();
-            StringBuilder extraKeys = new StringBuilder();
+            int extraCount = 0;
             try {
                 android.os.Bundle extras = intent.getExtras();
                 if (extras != null) {
-                    int count = 0;
-                    for (String key : extras.keySet()) {
-                        if (count++ == 16) {
-                            extraKeys.append(",…");
-                            break;
-                        }
-                        if (extraKeys.length() > 0) extraKeys.append(',');
-                        extraKeys.append(key);
-                    }
+                    extraCount = extras.size();
                 }
             } catch (Throwable ignored) {
-                extraKeys.append("unavailable");
+                extraCount = -1;
             }
             return "pkg=" + intent.getPackage()
                     + " cmp=" + component
@@ -2433,151 +2523,9 @@ public class MoreBubbleHookModule extends XposedModule {
                     + " data=" + dataOrigin
                     + " categories=" + (categories == null ? "[]" : categories)
                     + " flags=0x" + Integer.toHexString(intent.getFlags())
-                    + " extraKeys=[" + extraKeys + "]";
+                    + " extraCount=" + (extraCount >= 0 ? extraCount : "unavailable");
         } catch (Throwable t) {
             return "summary-unavailable:" + t.getClass().getSimpleName();
-        }
-    }
-
-    /** Write every Intent field and available extra value in bounded logcat records. */
-    private static void logFullIntent(String label, Intent intent) {
-        if (intent == null) {
-            Log.i(TAG, label + ": <null>");
-            return;
-        }
-        StringBuilder dump = new StringBuilder(1024);
-        dump.append("Intent.toString()=").append(intent)
-                .append("\nIntent.toUri()=");
-        try {
-            dump.append(intent.toUri(Intent.URI_INTENT_SCHEME));
-        } catch (Throwable t) {
-            dump.append("<unavailable: ").append(t.getClass().getSimpleName()).append('>');
-        }
-        try {
-            dump.append("\nidentifier=").append(intent.getIdentifier())
-                    .append("\nsourceBounds=").append(intent.getSourceBounds())
-                    .append("\nclipData=").append(intent.getClipData());
-        } catch (Throwable t) {
-            dump.append("\nadditionalFields=<unavailable: ")
-                    .append(t.getClass().getSimpleName()).append('>');
-        }
-        Intent selector = intent.getSelector();
-        if (selector != null) {
-            dump.append("\nselector={").append(selector).append('}');
-        }
-        try {
-            android.os.Bundle extras = intent.getExtras();
-            if (extras == null) {
-                dump.append("\nextras=<none>");
-            } else {
-                for (String key : extras.keySet()) {
-                    dump.append("\nextra[").append(key).append("]=");
-                    try {
-                        dump.append(formatDebugValue(extras.get(key), 0));
-                    } catch (Throwable t) {
-                        dump.append("<unreadable: ").append(t.getClass().getName())
-                                .append(": ").append(t.getMessage()).append('>');
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            dump.append("\nextras=<unavailable: ").append(t.getClass().getName())
-                    .append(": ").append(t.getMessage()).append('>');
-        }
-
-        final int chunkSize = 2800;
-        String contents = dump.toString();
-        int parts = Math.max(1, (contents.length() + chunkSize - 1) / chunkSize);
-        for (int i = 0; i < parts; i++) {
-            int start = i * chunkSize;
-            int end = Math.min(contents.length(), start + chunkSize);
-            Log.i(TAG, label + " [part " + (i + 1) + "/" + parts + "]: "
-                    + contents.substring(start, end));
-        }
-    }
-
-    private static String formatDebugValue(Object value, int depth) {
-        if (value == null) return "null";
-        if (depth >= 12) return "<max-depth:" + value.getClass().getName() + ">";
-        if (value instanceof Intent) {
-            Intent nestedIntent = (Intent) value;
-            StringBuilder result = new StringBuilder("Intent{");
-            try {
-                result.append(nestedIntent.toUri(Intent.URI_INTENT_SCHEME));
-            } catch (Throwable t) {
-                result.append(nestedIntent);
-            }
-            android.os.Bundle nestedExtras = nestedIntent.getExtras();
-            if (nestedExtras != null) {
-                for (String key : nestedExtras.keySet()) {
-                    result.append(", extra[").append(key).append("]=")
-                            .append(formatDebugValue(nestedExtras.get(key), depth + 1));
-                }
-            }
-            return result.append('}').toString();
-        }
-        if (value instanceof PendingIntent) {
-            PendingIntent pendingIntent = (PendingIntent) value;
-            StringBuilder result = new StringBuilder("PendingIntent{")
-                    .append(safePendingIntentCreator(pendingIntent));
-            try {
-                Method getIntent = findMethodSystemUi(pendingIntent.getClass(), "getIntent");
-                if (getIntent != null) {
-                    Object senderIntent = getIntent.invoke(pendingIntent);
-                    result.append(", senderIntent=")
-                            .append(formatDebugValue(senderIntent, depth + 1));
-                } else {
-                    result.append(", senderIntent=<unavailable>");
-                }
-            } catch (Throwable t) {
-                result.append(", senderIntent=<unavailable: ")
-                        .append(t.getClass().getName()).append('>');
-            }
-            return result.append('}').toString();
-        }
-        // Binary notification payloads are common (for example, Mi Push extras).
-        // Expanding byte[] through reflection boxes every byte and bloats a single
-        // Intent dump into hundreds of logcat records. Base64 preserves every byte
-        // while keeping the output compact and reversible.
-        if (value instanceof byte[]) {
-            byte[] bytes = (byte[]) value;
-            return "byte[" + bytes.length + "] base64="
-                    + java.util.Base64.getEncoder().encodeToString(bytes);
-        }
-        if (value instanceof android.os.Bundle) {
-            android.os.Bundle bundle = (android.os.Bundle) value;
-            StringBuilder result = new StringBuilder("Bundle{");
-            boolean first = true;
-            for (String key : bundle.keySet()) {
-                if (!first) result.append(", ");
-                first = false;
-                result.append(key).append('=').append(formatDebugValue(bundle.get(key), depth + 1));
-            }
-            return result.append('}').toString();
-        }
-        if (value instanceof List<?>) {
-            StringBuilder result = new StringBuilder("[");
-            List<?> list = (List<?>) value;
-            for (int i = 0; i < list.size(); i++) {
-                if (i > 0) result.append(", ");
-                result.append(formatDebugValue(list.get(i), depth + 1));
-            }
-            return result.append(']').toString();
-        }
-        if (value.getClass().isArray()) {
-            StringBuilder result = new StringBuilder(value.getClass().getComponentType().getName())
-                    .append("[");
-            int length = java.lang.reflect.Array.getLength(value);
-            for (int i = 0; i < length; i++) {
-                if (i > 0) result.append(", ");
-                result.append(formatDebugValue(java.lang.reflect.Array.get(value, i), depth + 1));
-            }
-            return result.append(']').toString();
-        }
-        try {
-            return value.getClass().getName() + "(" + value + ")";
-        } catch (Throwable t) {
-            return "<unprintable:" + value.getClass().getName() + ">";
         }
     }
 
