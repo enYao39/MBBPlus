@@ -2392,7 +2392,6 @@ public class MoreBubbleHookModule extends XposedModule {
                 return null;
             }
             Intent copy = new Intent(intent);
-            copy.putExtra("IS_FROM_NOTIFICATION", true);
             if (pkg != null && copy.getPackage() == null) {
                 copy.setPackage(pkg);
             }
