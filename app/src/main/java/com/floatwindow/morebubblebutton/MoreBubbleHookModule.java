@@ -1354,6 +1354,10 @@ public class MoreBubbleHookModule extends XposedModule {
             Notification notification = sbn != null
                     ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
             if (notification == null || notification.contentIntent == null) return false;
+            Log.i(TAG, reason + ": Freeform notification route creator="
+                    + safePendingIntentCreator(notification.contentIntent)
+                    + " target=" + summarizeIntent(getNotificationTargetIntent(notification,
+                    getNotificationPackage(sbn))));
             if (!isFreeformSupported(ctx)) {
                 Log.w(TAG, reason + ": device freeform support is disabled");
                 showFreeformUnavailableToast(ctx);
@@ -2094,7 +2098,13 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             Intent targetIntent = getNotificationTargetIntent(notif, pkg);
             Intent launchIntent = ctx != null ? ctx.getPackageManager().getLaunchIntentForPackage(pkg) : null;
+            boolean usingLaunchFallback = targetIntent == null;
             if (targetIntent == null) targetIntent = launchIntent;
+            Log.i(TAG, reason + ": Bubble notification route pkg=" + pkg
+                    + " creator=" + (notif != null && notif.contentIntent != null
+                    ? safePendingIntentCreator(notif.contentIntent) : "none")
+                    + " launchFallback=" + usingLaunchFallback
+                    + " target=" + summarizeIntent(targetIntent));
             if (targetIntent == null || launchIntent == null) {
                 Log.w(TAG, reason + ": skip app bubble, no target intent for " + pkg);
                 collapseShadeFromManager(bubblesManager);
@@ -2127,7 +2137,8 @@ public class MoreBubbleHookModule extends XposedModule {
                     }
                     if (expand != null) {
                         expand.invoke(controller, finalIntent, finalUser, entryPoint, null);
-                        Log.i(TAG, reason + ": expanded app bubble for " + pkg);
+                        Log.i(TAG, reason + ": expanded app bubble through legacy API for "
+                                + pkg + " target=" + summarizeIntent(finalIntent));
                         runOnSysuiMain(bubblesManager, () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
                         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
                     } else if (expandAppBubbleNewApi(controller, finalIntent, finalUser, entryPoint, pkg, reason)) {
@@ -2166,6 +2177,8 @@ public class MoreBubbleHookModule extends XposedModule {
     private static boolean expandAppBubbleNewApi(Object controller, Intent intent, UserHandle user,
             Object entryPoint, String pkg, String reason) {
         try {
+            Log.i(TAG, reason + ": using TYPE_APP bubble API for " + pkg
+                    + " target=" + summarizeIntent(intent));
             ClassLoader cl = controller.getClass().getClassLoader();
             Class<?> bubbleCls = cl.loadClass("com.android.wm.shell.bubbles.Bubble");
             Class<?> bubbleTypeCls = cl.loadClass("com.android.wm.shell.bubbles.Bubble$BubbleType");
@@ -2286,15 +2299,79 @@ public class MoreBubbleHookModule extends XposedModule {
                 Method getIntent = findMethodSystemUi(pi.getClass(), "getIntent");
                 if (getIntent != null) intent = (Intent) getIntent.invoke(pi);
             }
-            if (intent == null) return null;
+            if (intent == null) {
+                Log.i(TAG, "Notification target Intent unavailable; contentIntent="
+                        + (pi != null) + " creator=" + safePendingIntentCreator(pi));
+                return null;
+            }
             Intent copy = new Intent(intent);
             copy.putExtra("IS_FROM_NOTIFICATION", true);
             if (pkg != null && copy.getPackage() == null) {
                 copy.setPackage(pkg);
             }
+            Log.i(TAG, "Notification target Intent extracted: creator="
+                    + safePendingIntentCreator(pi) + " target=" + summarizeIntent(copy));
             return copy;
         } catch (Throwable t) {
             Log.w(TAG, "notification target intent: " + t.getMessage());
+            return null;
+        }
+    }
+
+    private static String safePendingIntentCreator(PendingIntent pendingIntent) {
+        if (pendingIntent == null) return "none";
+        try {
+            return pendingIntent.getCreatorPackage() + "/uid=" + pendingIntent.getCreatorUid();
+        } catch (Throwable ignored) {
+            return "unknown";
+        }
+    }
+
+    /** Summarize routing metadata without logging URI paths, query values, or Intent extra values. */
+    private static String summarizeIntent(Intent intent) {
+        if (intent == null) return "null";
+        try {
+            String component = intent.getComponent() != null
+                    ? intent.getComponent().flattenToShortString() : "implicit";
+            Uri data = intent.getData();
+            String dataOrigin = data == null ? "none"
+                    : String.valueOf(data.getScheme()) + "://" + String.valueOf(data.getHost());
+            Set<String> categories = intent.getCategories();
+            StringBuilder extraKeys = new StringBuilder();
+            try {
+                android.os.Bundle extras = intent.getExtras();
+                if (extras != null) {
+                    int count = 0;
+                    for (String key : extras.keySet()) {
+                        if (count++ == 16) {
+                            extraKeys.append(",…");
+                            break;
+                        }
+                        if (extraKeys.length() > 0) extraKeys.append(',');
+                        extraKeys.append(key);
+                    }
+                }
+            } catch (Throwable ignored) {
+                extraKeys.append("unavailable");
+            }
+            return "pkg=" + intent.getPackage()
+                    + " cmp=" + component
+                    + " action=" + intent.getAction()
+                    + " data=" + dataOrigin
+                    + " categories=" + (categories == null ? "[]" : categories)
+                    + " flags=0x" + Integer.toHexString(intent.getFlags())
+                    + " extraKeys=[" + extraKeys + "]";
+        } catch (Throwable t) {
+            return "summary-unavailable:" + t.getClass().getSimpleName();
+        }
+    }
+
+    private static String getNotificationPackage(Object sbn) {
+        try {
+            Object packageName = sbn != null
+                    ? sbn.getClass().getMethod("getPackageName").invoke(sbn) : null;
+            return packageName instanceof String ? (String) packageName : null;
+        } catch (Throwable ignored) {
             return null;
         }
     }
