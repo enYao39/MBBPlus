@@ -2334,7 +2334,8 @@ public class MoreBubbleHookModule extends XposedModule {
                         expand.invoke(controller, finalIntent, finalUser, entryPoint, null);
                         Log.i(TAG, reason + ": expanded app bubble through legacy API for "
                                 + pkg + " target=" + summarizeIntent(finalIntent));
-                        scheduleBubbleTaskSnapshots(ctx, pkg, reason, "legacy");
+                        scheduleBubbleTaskSnapshots(ctx, pkg, reason, "legacy",
+                                controller, null, finalIntent);
                         runOnSysuiMain(bubblesManager, () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
                         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
                     } else if (expandAppBubbleNewApi(controller, finalIntent, finalUser, entryPoint, pkg, reason)) {
@@ -2342,7 +2343,6 @@ public class MoreBubbleHookModule extends XposedModule {
                         // expandStackAndSelectBubble(Intent, UserHandle, EntryPoint, BubbleBarLocation).
                         // Mirror the system's own showAppBubble() implementation: build a TYPE_APP
                         // Bubble and hand it to expandStackAndSelectAppBubble(Bubble, EntryPoint, ...).
-                        scheduleBubbleTaskSnapshots(ctx, pkg, reason, "TYPE_APP");
                         runOnSysuiMain(bubblesManager, () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
                         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
                     } else {
@@ -2512,6 +2512,8 @@ public class MoreBubbleHookModule extends XposedModule {
                     + " package=" + pkg + " entryPoint=" + entryPoint
                     + " intent=" + summarizeIntent(intent));
             Log.i(TAG, reason + ": expanded app bubble via expandStackAndSelectAppBubble for " + pkg);
+            scheduleBubbleTaskSnapshots(context, pkg, reason, "TYPE_APP",
+                    controller, key, intent);
             return true;
         } catch (Throwable t) {
             Log.w(TAG, reason + ": app bubble new api failed: " + t.getMessage());
@@ -2596,7 +2598,7 @@ public class MoreBubbleHookModule extends XposedModule {
 
     /** Schedule task snapshots only when detailed logging is enabled. */
     private static void scheduleBubbleTaskSnapshots(Context context, String packageName,
-            String reason, String api) {
+            String reason, String api, Object controller, String bubbleKey, Intent submittedIntent) {
         if (!isDebugLoggingEnabled(context) || packageName == null) return;
         Handler handler = new Handler(Looper.getMainLooper());
         long[] delaysMs = {300L, 1200L, 2800L};
@@ -2604,6 +2606,21 @@ public class MoreBubbleHookModule extends XposedModule {
             handler.postDelayed(() -> {
                 if (!isDebugLoggingEnabled(context)) return;
                 try {
+                    if (controller != null && bubbleKey != null) {
+                        Intent adoptedIntent = readControllerAppBubbleIntent(controller, bubbleKey);
+                        if (adoptedIntent == null) {
+                            logDetailedInfo(context, reason + ": Bubble Controller intent snapshot api=" + api
+                                    + " elapsedMs=" + delayMs + " bubbleKey=" + bubbleKey
+                                    + " result=app-bubble-intent-unavailable");
+                        } else {
+                            logDetailedInfo(context, reason + ": Bubble Controller intent snapshot api=" + api
+                                    + " elapsedMs=" + delayMs + " bubbleKey=" + bubbleKey
+                                    + " adopted=" + summarizeIntent(adoptedIntent));
+                            logIntentDetails(context, reason + ": Bubble Controller adopted intent", adoptedIntent);
+                            logIntentComparison(context, reason + ": submitted vs Bubble Controller", submittedIntent,
+                                    adoptedIntent);
+                        }
+                    }
                     ActivityManager activityManager = (ActivityManager)
                             context.getSystemService(Context.ACTIVITY_SERVICE);
                     List<ActivityManager.RunningTaskInfo> tasks = activityManager != null
@@ -2644,6 +2661,11 @@ public class MoreBubbleHookModule extends XposedModule {
                                 + " top=" + flattenComponent(top)
                                 + " base=" + flattenComponent(base)
                                 + " baseIntent=" + summarizeIntent(task.baseIntent));
+                        if (task.baseIntent != null && submittedIntent != null) {
+                            logIntentDetails(context, reason + ": task baseIntent", task.baseIntent);
+                            logIntentComparison(context, reason + ": submitted vs task baseIntent",
+                                    submittedIntent, task.baseIntent);
+                        }
                     }
                     if (matches == 0) {
                         logDetailedInfo(context, reason + ": Bubble task snapshot api=" + api
@@ -2657,6 +2679,39 @@ public class MoreBubbleHookModule extends XposedModule {
                 }
             }, delayMs);
         }
+    }
+
+    private static Intent readControllerAppBubbleIntent(Object controller, String bubbleKey) {
+        try {
+            Object bubbleData = getFieldSystemUi(controller, "mBubbleData");
+            if (bubbleData == null) return null;
+            Object bubble = null;
+            Method byKey = findMethodSystemUi(bubbleData.getClass(), "getBubbleInStackWithKey", String.class);
+            if (byKey != null) bubble = byKey.invoke(bubbleData, bubbleKey);
+            if (bubble == null) {
+                Method selected = findMethodSystemUi(bubbleData.getClass(), "getSelectedBubble");
+                if (selected != null) {
+                    Object candidate = selected.invoke(bubbleData);
+                    Object selectedKey = candidate != null ? invokeSystemUi(candidate, "getKey") : null;
+                    if (candidate != null && bubbleKey.equals(selectedKey)) bubble = candidate;
+                }
+            }
+            if (bubble == null) return null;
+            Object intent = invokeSystemUi(bubble, "getAppBubbleIntent");
+            if (!(intent instanceof Intent)) intent = getFieldSystemUi(bubble, "mAppIntent");
+            return intent instanceof Intent ? (Intent) intent : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static void logIntentComparison(Context context, String label, Intent submitted, Intent observed) {
+        if (!isDebugLoggingEnabled(context) || submitted == null || observed == null) return;
+        logDetailedInfo(context, label + " filterEquals=" + submitted.filterEquals(observed)
+                + " identifierEqual=" + java.util.Objects.equals(
+                        submitted.getIdentifier(), observed.getIdentifier())
+                + " submitted=" + summarizeIntent(submitted)
+                + " observed=" + summarizeIntent(observed));
     }
 
     private static String flattenComponent(ComponentName component) {
