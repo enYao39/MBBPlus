@@ -2104,7 +2104,9 @@ public class MoreBubbleHookModule extends XposedModule {
             if (controller == null || pkg == null) return false;
             Notification notif = (Notification) invokeSystemUi(sbn, "getNotification");
             Context ctx = (Context) getFieldSystemUi(controller, "mContext");
+            Object notificationKey = getFieldSystemUi(entry, "key");
             logDetailedInfo(ctx, reason + ": Bubble route requested package=" + pkg
+                    + " notificationKey=" + notificationKey
                     + " openMode=" + (isFreeformOpenMode(ctx) ? "freeform" : "bubble"));
             if (isFreeformOpenMode(ctx)) {
                 boolean launched = launchNotificationInFreeform(ctx, entry, reason);
@@ -2119,10 +2121,14 @@ public class MoreBubbleHookModule extends XposedModule {
             boolean usingLaunchFallback = targetIntent == null;
             if (targetIntent == null) targetIntent = launchIntent;
             logDetailedInfo(ctx, reason + ": Bubble notification route pkg=" + pkg
+                    + " notificationKey=" + notificationKey
                     + " creator=" + (notif != null && notif.contentIntent != null
                     ? safePendingIntentCreator(notif.contentIntent) : "none")
+                    + " pendingIntentId=" + (notif != null && notif.contentIntent != null
+                    ? System.identityHashCode(notif.contentIntent) : "none")
                     + " launchFallback=" + usingLaunchFallback
                     + " target=" + summarizeIntent(targetIntent));
+            logIntentDetails(ctx, reason + ": Bubble target intent", targetIntent);
             if (targetIntent == null || launchIntent == null) {
                 Log.w(TAG, reason + ": skip app bubble, no target intent for " + pkg);
                 collapseShadeFromManager(bubblesManager);
@@ -2136,9 +2142,11 @@ public class MoreBubbleHookModule extends XposedModule {
             final Intent finalIntent = targetIntent;
             final UserHandle finalUser = user;
             logDetailedInfo(ctx, reason + ": Bubble launch prepared package=" + pkg
+                    + " notificationKey=" + notificationKey
                     + " launchFallback=" + usingLaunchFallback
                     + " entryPoint=" + entryPoint
                     + " intent=" + summarizeIntent(finalIntent));
+            logIntentDetails(ctx, reason + ": Bubble submitted intent", finalIntent);
             Runnable work = () -> {
                 try {
                     Class<?> bubbleBarLocCls = clOrNull(controller.getClass().getClassLoader(),
@@ -2268,6 +2276,9 @@ public class MoreBubbleHookModule extends XposedModule {
             Object bubbleType = Enum.valueOf((Class<? extends Enum>) bubbleTypeCls, "TYPE_APP");
             String key = (String) bubbleCls.getMethod("getAppBubbleKeyForApp", String.class, UserHandle.class)
                     .invoke(null, pkg, user);
+            Context context = (Context) getFieldSystemUi(controller, "mContext");
+            logDetailedInfo(context, reason + ": TYPE_APP identity package=" + pkg
+                    + " bubbleKey=" + key + " user=" + user);
             android.graphics.drawable.Icon icon = buildAppBubbleIcon(controller, intent, pkg);
             Object bubble = null;
             // Evolution's Android 17 build has a five-argument constructor,
@@ -2332,7 +2343,6 @@ public class MoreBubbleHookModule extends XposedModule {
             } else {
                 expandApp.invoke(controller, bubble, entryPoint, null);
             }
-            Context context = (Context) getFieldSystemUi(controller, "mContext");
             logDetailedInfo(context, reason + ": submitted TYPE_APP Bubble"
                     + " package=" + pkg + " entryPoint=" + entryPoint
                     + " intent=" + summarizeIntent(intent));
@@ -2497,7 +2507,91 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    /** Summarize routing metadata without logging URI paths, query values, or Intent extra values. */
+    /** Log complete launch routing data only when detailed debug logging is enabled. */
+    private static void logIntentDetails(Context context, String label, Intent intent) {
+        if (!isDebugLoggingEnabled(context) || intent == null) return;
+        try {
+            logDetailedInfo(context, label + " data=" + limitDebugValue(intent.getDataString()));
+            logDetailedInfo(context, label + " identifier=" + intent.getIdentifier());
+            android.os.Bundle extras = intent.getExtras();
+            if (extras == null || extras.isEmpty()) {
+                logDetailedInfo(context, label + " extras=empty");
+                return;
+            }
+            for (String name : new java.util.TreeSet<>(extras.keySet())) {
+                Object value;
+                try {
+                    value = extras.get(name);
+                } catch (Throwable t) {
+                    logDetailedInfo(context, label + " extra[" + name + "]=<read-failed:" + t.getClass().getSimpleName() + ">");
+                    continue;
+                }
+                logDetailedInfo(context, label + " extra[" + name + "] type="
+                        + (value == null ? "null" : value.getClass().getName())
+                        + " value=" + describeDebugValue(value));
+                if (value instanceof android.os.Bundle) {
+                    logBundleDetails(context, label + " extra[" + name + "]", (android.os.Bundle) value, 1);
+                }
+            }
+        } catch (Throwable t) {
+            logDetailedInfo(context, label + " details-failed=" + t.getClass().getSimpleName());
+        }
+    }
+
+    private static void logBundleDetails(Context context, String label,
+            android.os.Bundle bundle, int depth) {
+        if (depth > 3) {
+            logDetailedInfo(context, label + " nested bundle depth limit reached");
+            return;
+        }
+        for (String name : new java.util.TreeSet<>(bundle.keySet())) {
+            Object value;
+            try {
+                value = bundle.get(name);
+            } catch (Throwable t) {
+                logDetailedInfo(context, label + "[" + name + "]=<read-failed:" + t.getClass().getSimpleName() + ">");
+                continue;
+            }
+            logDetailedInfo(context, label + "[" + name + "] type="
+                    + (value == null ? "null" : value.getClass().getName())
+                    + " value=" + describeDebugValue(value));
+            if (value instanceof android.os.Bundle) {
+                logBundleDetails(context, label + "[" + name + "]", (android.os.Bundle) value, depth + 1);
+            }
+        }
+    }
+
+    private static String describeDebugValue(Object value) {
+        if (value == null) return "null";
+        if (value instanceof byte[]) {
+            byte[] bytes = (byte[]) value;
+            StringBuilder out = new StringBuilder("bytes[").append(bytes.length).append("] hex=");
+            int limit = Math.min(bytes.length, 512);
+            for (int i = 0; i < limit; i++) out.append(String.format(Locale.ROOT, "%02x", bytes[i] & 0xff));
+            if (bytes.length > limit) out.append("...(truncated)");
+            return out.toString();
+        }
+        if (value instanceof android.os.Bundle) {
+            android.os.Bundle bundle = (android.os.Bundle) value;
+            return "Bundle(keys=" + new java.util.TreeSet<>(bundle.keySet()) + ")";
+        }
+        if (value instanceof int[] || value instanceof long[] || value instanceof boolean[]
+                || value instanceof String[] || value instanceof Object[]) {
+            if (value instanceof int[]) return java.util.Arrays.toString((int[]) value);
+            if (value instanceof long[]) return java.util.Arrays.toString((long[]) value);
+            if (value instanceof boolean[]) return java.util.Arrays.toString((boolean[]) value);
+            return java.util.Arrays.deepToString((Object[]) value);
+        }
+        return limitDebugValue(String.valueOf(value));
+    }
+
+    private static String limitDebugValue(String value) {
+        if (value == null) return "null";
+        final int max = 1800;
+        return value.length() <= max ? value : value.substring(0, max) + "...(truncated,len=" + value.length() + ")";
+    }
+
+    /** Summarize routing metadata for normal non-detailed log lines. */
     private static String summarizeIntent(Intent intent) {
         if (intent == null) return "null";
         try {
