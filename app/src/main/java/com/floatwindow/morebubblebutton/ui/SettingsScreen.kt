@@ -133,6 +133,26 @@ fun SettingsScreen() {
                         ModuleSettings.setActionBarEnabled(ctx, it)
                     }
                 )
+                if (actionBarEnabled) {
+                    PreferenceDivider()
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Text(
+                            text = stringResource(R.string.section_position),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        ButtonPositionControls(
+                            ctx = ctx,
+                            positionMode = positionMode,
+                            setPositionMode = { positionMode = it },
+                            sliderX = sliderX,
+                            setSliderX = { sliderX = it },
+                            sliderY = sliderY,
+                            setSliderY = { sliderY = it }
+                        )
+                    }
+                }
             }
         }
 
@@ -254,123 +274,6 @@ fun SettingsScreen() {
             }
         }
 
-        item { SectionHeading(Icons.Default.Settings, R.string.section_position) }
-        item {
-            SettingsCard {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Text(
-                        text = stringResource(R.string.position_mode_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        SegmentedButton(
-                            selected = positionMode == 0,
-                            onClick = {
-                                positionMode = 0
-                                ModuleSettings.setPositionMode(ctx, 0)
-                                applyPosition(ctx)
-                            },
-                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                            modifier = Modifier.weight(1f),
-                            label = {
-                                Text(
-                                    text = stringResource(R.string.position_mode_follow),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        )
-                        SegmentedButton(
-                            selected = positionMode == 1,
-                            onClick = {
-                                positionMode = 1
-                                ModuleSettings.setPositionMode(ctx, 1)
-                                applyPosition(ctx)
-                            },
-                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                            modifier = Modifier.weight(1f),
-                            label = {
-                                Text(
-                                    text = stringResource(R.string.position_mode_second),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        )
-                    }
-
-                    if (positionMode == 1) {
-                        Spacer(modifier = Modifier.height(18.dp))
-                        FineTuneSlider(
-                            label = stringResource(R.string.position_x),
-                            hint = stringResource(R.string.position_x_hint),
-                            value = sliderX,
-                            valueText = stringResource(
-                                R.string.position_value,
-                                stringResource(R.string.position_x), sliderX.toInt()
-                            ),
-                            valueRange = 0f..100f,
-                            steps = 99,
-                            onValueChange = { sliderX = it },
-                            onCommit = {
-                                ModuleSettings.setPosX(ctx, sliderX.toInt())
-                                applyPosition(ctx)
-                            },
-                            onStep = { delta ->
-                                sliderX = (sliderX + delta).coerceIn(0f, 100f)
-                                ModuleSettings.setPosX(ctx, sliderX.toInt())
-                                applyPosition(ctx)
-                            }
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        FineTuneSlider(
-                            label = stringResource(R.string.position_y),
-                            hint = stringResource(R.string.position_y_hint),
-                            value = sliderY,
-                            valueText = stringResource(
-                                R.string.position_value,
-                                stringResource(R.string.position_y), sliderY.toInt()
-                            ),
-                            valueRange = 0f..100f,
-                            steps = 99,
-                            onValueChange = { sliderY = it },
-                            onCommit = {
-                                ModuleSettings.setPosY(ctx, sliderY.toInt())
-                                applyPosition(ctx)
-                            },
-                            onStep = { delta ->
-                                sliderY = (sliderY + delta).coerceIn(0f, 100f)
-                                ModuleSettings.setPosY(ctx, sliderY.toInt())
-                                applyPosition(ctx)
-                            }
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        OutlinedButton(
-                            onClick = {
-                                sliderX = 50f
-                                sliderY = 50f
-                                ModuleSettings.setPosX(ctx, 50)
-                                ModuleSettings.setPosY(ctx, 50)
-                                applyPosition(ctx)
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(stringResource(R.string.reset_position))
-                        }
-                    } else {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = stringResource(R.string.position_mode_follow_summary),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-
         item { SectionHeading(Icons.Default.Refresh, R.string.section_actions) }
         item {
             SettingsCard {
@@ -483,6 +386,123 @@ private fun RootAccessStatus(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ButtonPositionControls(
+    ctx: Context,
+    positionMode: Int,
+    setPositionMode: (Int) -> Unit,
+    sliderX: Float,
+    setSliderX: (Float) -> Unit,
+    sliderY: Float,
+    setSliderY: (Float) -> Unit
+) {
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        SegmentedButton(
+            selected = positionMode == 0,
+            onClick = {
+                setPositionMode(0)
+                ModuleSettings.setPositionMode(ctx, 0)
+                applyPosition(ctx)
+            },
+            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+            modifier = Modifier.weight(1f),
+            label = {
+                Text(
+                    text = stringResource(R.string.position_mode_follow),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        )
+        SegmentedButton(
+            selected = positionMode == 1,
+            onClick = {
+                setPositionMode(1)
+                ModuleSettings.setPositionMode(ctx, 1)
+                applyPosition(ctx)
+            },
+            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+            modifier = Modifier.weight(1f),
+            label = {
+                Text(
+                    text = stringResource(R.string.position_mode_second),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        )
+    }
+
+    if (positionMode == 1) {
+        Spacer(modifier = Modifier.height(18.dp))
+        FineTuneSlider(
+            label = stringResource(R.string.position_x),
+            hint = stringResource(R.string.position_x_hint),
+            value = sliderX,
+            valueText = stringResource(
+                R.string.position_value,
+                stringResource(R.string.position_x), sliderX.toInt()
+            ),
+            valueRange = 0f..100f,
+            steps = 99,
+            onValueChange = setSliderX,
+            onCommit = {
+                ModuleSettings.setPosX(ctx, sliderX.toInt())
+                applyPosition(ctx)
+            },
+            onStep = { delta ->
+                val updated = (sliderX + delta).coerceIn(0f, 100f)
+                setSliderX(updated)
+                ModuleSettings.setPosX(ctx, updated.toInt())
+                applyPosition(ctx)
+            }
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        FineTuneSlider(
+            label = stringResource(R.string.position_y),
+            hint = stringResource(R.string.position_y_hint),
+            value = sliderY,
+            valueText = stringResource(
+                R.string.position_value,
+                stringResource(R.string.position_y), sliderY.toInt()
+            ),
+            valueRange = 0f..100f,
+            steps = 99,
+            onValueChange = setSliderY,
+            onCommit = {
+                ModuleSettings.setPosY(ctx, sliderY.toInt())
+                applyPosition(ctx)
+            },
+            onStep = { delta ->
+                val updated = (sliderY + delta).coerceIn(0f, 100f)
+                setSliderY(updated)
+                ModuleSettings.setPosY(ctx, updated.toInt())
+                applyPosition(ctx)
+            }
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        OutlinedButton(
+            onClick = {
+                setSliderX(50f)
+                setSliderY(50f)
+                ModuleSettings.setPosX(ctx, 50)
+                ModuleSettings.setPosY(ctx, 50)
+                applyPosition(ctx)
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(stringResource(R.string.reset_position))
+        }
+    } else {
+        Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            text = stringResource(R.string.position_mode_follow_summary),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 

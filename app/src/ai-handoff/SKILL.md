@@ -36,6 +36,7 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 - 横条底部间距范围为 `-10dp..24dp`；修改设置范围时必须同步更新 `ModuleSettings`、Compose 设置页、`SettingsProvider` 和中英文资源。
 - 中英文资源必须同步；英文采用 “Bubble” 和 “Freeform” 等短文案。
 - 设置项文案过长时优先缩短摘要或使用单独说明，不要让选择框被长字符串撑大。
+- Button position 属于 Recents 下的 Bottom action bar 子设置；只在底部操作栏开启时展示，关闭时隐藏整组位置控件。
 
 ## Release 瘦身规则
 
