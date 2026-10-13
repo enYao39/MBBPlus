@@ -43,7 +43,6 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam;
 
 public class MoreBubbleHookModule extends XposedModule {
     private static final String TAG = "MoreBubbleModule";
-    private Object recentsViewInstance;
     private View bubbleButton;
     private static View sSecondRow;
     private ClassLoader mLauncherClassLoader;
@@ -2618,8 +2617,8 @@ public class MoreBubbleHookModule extends XposedModule {
             hook(cl.loadClass("com.android.quickstep.views.OverviewActionsView")
                     .getMethod("onClick", View.class)).intercept(chain -> {
                 View v = (View) chain.getArg(0);
-                if (v != null && bubbleButton != null && v.getId() == bubbleButton.getId()) {
-                    onBubbleButtonClick((View) chain.getThisObject());
+                if (v != null && v == bubbleButton) {
+                    onBubbleButtonClick(v);
                     return null;
                 }
                 return chain.proceed();
@@ -2744,25 +2743,6 @@ public class MoreBubbleHookModule extends XposedModule {
         actionButtons.addView(btn);
         bubbleButton = btn;
 
-        // 捕获 RecentsView（从 actionsParent 的 parent 链查找）
-        if (recentsViewInstance == null) {
-            try {
-                Class<?> rvCls = mLauncherClassLoader.loadClass(
-                        "com.android.quickstep.views.RecentsView");
-                View cur = actionsParent;
-                while (cur != null) {
-                    if (rvCls.isInstance(cur)) {
-                        recentsViewInstance = cur;
-                        Log.i(TAG, "Captured RecentsView in follow mode: " + cur);
-                        break;
-                    }
-                    cur = (cur.getParent() instanceof View) ? (View) cur.getParent() : null;
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "Capture RecentsView failed: " + t.getMessage());
-            }
-        }
-
         Log.i(TAG, "Bubble button added to action_buttons (follow mode)");
     }
 
@@ -2787,7 +2767,7 @@ public class MoreBubbleHookModule extends XposedModule {
         android.graphics.drawable.Drawable icon = getConfiguredActionIcon(ctx, res, pkg);
         if (icon != null) btn.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
 
-        btn.setOnClickListener(v -> onBubbleButtonClick((View) btn.getParent().getParent()));
+        btn.setOnClickListener(this::onBubbleButtonClick);
         return btn;
     }
 
@@ -2960,15 +2940,6 @@ public class MoreBubbleHookModule extends XposedModule {
             Object taskContainer = findMethod(menuView.getClass(), "getTaskContainer").invoke(menuView);
             if (optionLayout == null || taskContainer == null) return;
 
-            // 捕获 RecentsView
-            try {
-                Object tv = findMethod(menuView.getClass(), "getTaskView").invoke(menuView);
-                if (tv != null) {
-                    recentsViewInstance = findMethod(tv.getClass(), "getRecentsView").invoke(tv);
-                    Log.i(TAG, "Captured RecentsView: " + recentsViewInstance);
-                }
-            } catch (Throwable ignored) {}
-
             ViewGroup menuItem = (ViewGroup) android.view.LayoutInflater.from(ctx)
                     .inflate(res.getIdentifier("task_view_menu_option", "layout", pkg), optionLayout, false);
 
@@ -3002,9 +2973,22 @@ public class MoreBubbleHookModule extends XposedModule {
                     Intent intent = (Intent) getField(key, "baseIntent");
                     int userId = getField(key, "userId") != null ? (int) getField(key, "userId") : 0;
                     if (intent != null) {
+                        Object recentsView = null;
+                        try {
+                            Object taskView = findMethod(menuView.getClass(), "getTaskView")
+                                    .invoke(menuView);
+                            if (taskView != null) {
+                                recentsView = findMethod(taskView.getClass(), "getRecentsView")
+                                        .invoke(taskView);
+                            }
+                        } catch (Throwable ignored) {}
                         findMethod(menuView.getClass(), "close", boolean.class).invoke(menuView, true);
-                        openTaskFromRecents(ctx, intent, task, userId);
-                        new android.os.Handler(Looper.getMainLooper()).postDelayed(() -> dismissOverview(ctx), 200);
+                        if (openTaskFromRecents(ctx, intent, task, userId)
+                                && recentsView != null) {
+                            Object targetRecentsView = recentsView;
+                            new android.os.Handler(Looper.getMainLooper()).postDelayed(
+                                    () -> dismissOverview(ctx, targetRecentsView), 200);
+                        }
                     }
                 } catch (Throwable t) { Log.e(TAG, "menu click: " + t.getMessage()); }
             });
@@ -3016,11 +3000,13 @@ public class MoreBubbleHookModule extends XposedModule {
     // ==================== 气泡触发 ====================
 
     private void onBubbleButtonClick(View actionsView) {
-        Context ctx = actionsView.getContext();
-        Object rv = recentsViewInstance;
-        if (rv == null) rv = findRecentsViewFromHierarchy(actionsView);
-        if (rv == null) { Log.w(TAG, "RecentsView not found"); return; }
+        Object rv = findRecentsViewAncestor(actionsView);
+        if (rv == null || !isActionBarInVisibleRecents(actionsView, rv)) {
+            Log.i(TAG, "Ignore bottom action bar click outside visible RecentsView");
+            return;
+        }
 
+        Context ctx = actionsView.getContext();
         try {
             Object tv = findMethod(rv.getClass(), "getCurrentPageTaskView").invoke(rv);
             if (tv == null) return;
@@ -3033,9 +3019,35 @@ public class MoreBubbleHookModule extends XposedModule {
             int userId = getField(key, "userId") != null ? (int) getField(key, "userId") : 0;
             if (intent == null) return;
 
-            openTaskFromRecents(ctx, intent, task, userId);
-            new android.os.Handler(Looper.getMainLooper()).postDelayed(() -> dismissOverview(ctx), 200);
+            if (openTaskFromRecents(ctx, intent, task, userId)) {
+                Object recentsView = rv;
+                new android.os.Handler(Looper.getMainLooper()).postDelayed(
+                        () -> dismissOverview(ctx, recentsView), 200);
+            }
         } catch (Throwable t) { Log.e(TAG, "onBubbleButtonClick: " + t.getMessage()); }
+    }
+
+    private Object findRecentsViewAncestor(View view) {
+        if (view == null || mLauncherClassLoader == null) return null;
+        try {
+            Class<?> recentsViewClass = mLauncherClassLoader.loadClass(
+                    "com.android.quickstep.views.RecentsView");
+            View current = view;
+            while (current != null) {
+                if (recentsViewClass.isInstance(current)) return current;
+                current = current.getParent() instanceof View
+                        ? (View) current.getParent() : null;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Find clicked button RecentsView: " + t.getMessage());
+        }
+        return null;
+    }
+
+    private static boolean isActionBarInVisibleRecents(View actionsView, Object recentsView) {
+        if (!(recentsView instanceof View) || actionsView == null) return false;
+        View recents = (View) recentsView;
+        return actionsView.isShown() && recents.isShown() && recents.isAttachedToWindow();
     }
 
     private boolean openTaskFromRecents(Context ctx, Intent intent, Object task, int userId) {
@@ -3218,49 +3230,15 @@ public class MoreBubbleHookModule extends XposedModule {
         return false;
     }
 
-    private Object findRecentsViewFromHierarchy(View view) {
+    private void dismissOverview(Context ctx, Object recentsView) {
         try {
-            Class<?> rvCls = mLauncherClassLoader.loadClass("com.android.quickstep.views.RecentsView");
-            // 先从 parent 链查找
-            View cur = view;
-            while (cur != null) {
-                if (rvCls.isInstance(cur)) { recentsViewInstance = cur; return cur; }
-                cur = (cur.getParent() instanceof View) ? (View) cur.getParent() : null;
+            if (!(recentsView instanceof View)) return;
+            if (!isActionBarInVisibleRecents((View) recentsView, recentsView)) return;
+            Object sm = findMethod(recentsView.getClass(), "getStateManager").invoke(recentsView);
+            if (sm != null) {
+                findMethod(sm.getClass(), "moveToRestState").invoke(sm);
+                Log.i(TAG, "dismissed current RecentsView via moveToRestState");
             }
-            // parent 链找不到，从 rootView 递归搜索
-            View root = view.getRootView();
-            if (root != null) {
-                cur = findInTree(root, rvCls);
-                if (cur != null) { recentsViewInstance = cur; return cur; }
-            }
-        } catch (Throwable ignored) {}
-        return null;
-    }
-
-    private View findInTree(View view, Class<?> cls) {
-        if (cls.isInstance(view)) return view;
-        if (view instanceof ViewGroup) {
-            ViewGroup vg = (ViewGroup) view;
-            for (int i = 0; i < vg.getChildCount(); i++) {
-                View f = findInTree(vg.getChildAt(i), cls);
-                if (f != null) return f;
-            }
-        }
-        return null;
-    }
-
-    private void dismissOverview(Context ctx) {
-        try {
-            if (recentsViewInstance != null) {
-                Object sm = findMethod(recentsViewInstance.getClass(), "getStateManager").invoke(recentsViewInstance);
-                if (sm != null) {
-                    findMethod(sm.getClass(), "moveToRestState").invoke(sm);
-                    Log.i(TAG, "dismissed via moveToRestState");
-                    return;
-                }
-            }
-            Runtime.getRuntime().exec(new String[]{"am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"});
-            Log.i(TAG, "dismissed via am start HOME");
         } catch (Throwable t) { Log.e(TAG, "dismiss: " + t.getMessage()); }
     }
 
