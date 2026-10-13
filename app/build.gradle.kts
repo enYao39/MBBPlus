@@ -19,8 +19,8 @@ android {
         applicationId = "com.floatwindow.morebubblebutton"
         minSdk = 36
         targetSdk = 37
-        versionCode = 38
-        versionName = "1.7.30"
+        versionCode = 39
+        versionName = "1.7.31"
     }
 
     signingConfigs {
