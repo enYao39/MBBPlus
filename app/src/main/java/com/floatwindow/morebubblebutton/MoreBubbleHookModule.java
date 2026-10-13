@@ -2302,6 +2302,12 @@ public class MoreBubbleHookModule extends XposedModule {
             if (targetIntent.getPackage() == null) {
                 targetIntent.setPackage(pkg);
             }
+            String originalIdentifier = targetIntent.getIdentifier();
+            String routeIdentifier = buildBubbleRouteIdentifier(pkg, notificationKey);
+            if (routeIdentifier != null) {
+                targetIntent.setIdentifier(originalIdentifier == null || originalIdentifier.isEmpty()
+                        ? routeIdentifier : originalIdentifier + "|" + routeIdentifier);
+            }
             targetIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
             Object entryPoint = findEntryPoint(controller.getClass().getClassLoader(), "NOTIFICATION");
             final Intent finalIntent = targetIntent;
@@ -2576,6 +2582,28 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) {
             Log.w(TAG, "notification target intent: " + t.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * Give each notification route a stable Intent identity. SystemUI's app Bubble key is
+     * shared by all notifications from one app, while Intent.filterEquals includes identifier;
+     * retaining the original identifier and adding a notification-key digest keeps distinct
+     * chats from being mistaken for the previously launched route without exposing the key.
+     */
+    private static String buildBubbleRouteIdentifier(String packageName, Object notificationKey) {
+        if (packageName == null || notificationKey == null) return null;
+        try {
+            String input = packageName + '\u0000' + notificationKey;
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder result = new StringBuilder("morebubble:");
+            for (int i = 0; i < 12; i++) {
+                result.append(String.format(Locale.ROOT, "%02x", digest[i] & 0xff));
+            }
+            return result.toString();
+        } catch (Throwable ignored) {
+            return "morebubble:" + Integer.toHexString((packageName + notificationKey).hashCode());
         }
     }
 
