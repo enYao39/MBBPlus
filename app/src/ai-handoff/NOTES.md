@@ -33,11 +33,12 @@
 ## 当前行为约定
 
 1. 打开方式可选 Bubble 或 Freeform。
-2. Bubble/Freeform 按钮在所有符合条件的非锁屏通知中保持显示。Swipe 模式不会隐藏 Heads-up 中的按钮，只会在 Heads-up popup 额外添加底部横条。
+2. Bubble/Freeform 按钮在符合条件的非锁屏通知中显示；通知按钮和 Heads-up swipe handle 是两个独立开关，可以同时启用，关闭通知按钮不应隐式关闭 swipe handle。
 3. 横条只存在于 Heads-up popup，不要添加到普通通知列表或锁屏布局。横条的底部间距支持 `-10dp..24dp`，负值表示将横条向通知底部外侧下移。
-4. Freeform 启动失败时依次回退到 Bubble，再回退到全屏 PendingIntent。
-5. 文案统一使用 “Bubble”，不要重新引入 “Message Bubble”。
-6. 没有 root 时不能把“手动重启 SystemUI”当作模块功能；只能提示用户使用设备支持的重载方式。
+4. 新开关为 `swipe_handle_enabled`；读取时需兼容旧 `popup_presentation=1` 设置，确保升级后原有横条偏好继续生效。
+5. Freeform 启动失败时依次回退到 Bubble，再回退到全屏 PendingIntent。
+6. 文案统一使用 “Bubble”，不要重新引入 “Message Bubble”。
+7. 没有 root 时不能把“手动重启 SystemUI”当作模块功能；只能提示用户使用设备支持的重载方式。
 
 ## Evolution/LMO Freeform 适配
 

@@ -4,7 +4,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 
 > Evolution 12.3 是当前主要实机验证基线；Lunaris AOSP 3.12 已针对通知注入路径做过兼容性验证。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
 
-当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.12 (20)`。
+当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.13 (21)`。
 
 ## 功能
 
@@ -21,7 +21,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
   - 优先跳转通知 `contentIntent` 对应界面，而不是只打开 app 首页
   - 自动收起通知中心
   - 对 `FLAG_AUTO_CANCEL` 通知执行移除，使其表现为已读/已处理
-- Heads-up popup 支持横条模式：保留原生 Bubble/Freeform 按钮，并额外叠加可下滑横条
+- Heads-up popup 的 Bubble 按钮和下滑横条由两个独立开关控制，可同时启用
   - 横条只显示在 Heads-up popup，不显示在普通通知列表或锁屏界面
   - 下滑横条会打开当前通知对应的 Bubble/Freeform 目标
   - 横条长度、粗细和距通知底部的间距可调；间距范围为 `-10dp..24dp`
@@ -64,7 +64,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 
 ### 方式四：Heads-up 横条
 
-在设置中选择“下滑横条” → 新通知以 Heads-up popup 出现时，原生按钮和横条都会显示 → 下滑横条打开当前通知。
+在“Heads-up 弹出通知”中启用“下滑横条” → 新通知以 popup 出现时横条显示 → 下滑打开当前通知。通知 Bubble 按钮可以单独开关。
 
 ### 方式五：设置界面
 
@@ -77,7 +77,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 | 任务卡片菜单 | 在菜单中显示消息气泡选项 | 开 |
 | 底部操作栏 | 在底部显示消息气泡按钮 | 开 |
 | 通知 Bubble 按钮 | 在非锁屏通知中显示 Bubble/Freeform 按钮 | 开 |
-| Heads-up 操作方式 | Bubble 按钮 / 下滑横条；下滑横条模式会在按钮之外增加横条 | Bubble 按钮 |
+| 下滑横条 | 在 Heads-up popup 上显示可下滑横条，与通知 Bubble 按钮独立 | 关 |
 | 横条长度 | Heads-up 横条长度 | 56dp |
 | 横条粗细 | Heads-up 横条粗细 | 7dp |
 | 横条距底部 | 横条相对通知底部的位置，支持 `-10dp..24dp` | 3dp |

@@ -18,6 +18,7 @@ public class ModuleSettings {
     public static final String KEY_SYSTEMUI_BUBBLE_ENABLED = "systemui_bubble_enabled";
     public static final String KEY_OPEN_MODE = "open_mode"; // 0=Bubble 1=Freeform
     public static final String KEY_POPUP_PRESENTATION = "popup_presentation"; // 0=按钮 1=下滑横条
+    public static final String KEY_SWIPE_HANDLE_ENABLED = "swipe_handle_enabled";
     public static final String KEY_SWIPE_HANDLE_LENGTH = "swipe_handle_length_dp";
     public static final String KEY_SWIPE_HANDLE_THICKNESS = "swipe_handle_thickness_dp";
     public static final String KEY_SWIPE_HANDLE_BOTTOM_MARGIN = "swipe_handle_bottom_margin_dp";
@@ -152,6 +153,23 @@ public class ModuleSettings {
         getPrefs(ctx).edit().putInt(KEY_POPUP_PRESENTATION,
                 value == POPUP_PRESENTATION_SWIPE_HANDLE
                         ? POPUP_PRESENTATION_SWIPE_HANDLE : POPUP_PRESENTATION_BUBBLE_BUTTON).apply();
+    }
+
+    /** Heads-up swipe handle toggle, migrated from the legacy mutually exclusive choice. */
+    public static boolean isSwipeHandleEnabled(Context ctx) {
+        Map<String, String> remote = getRemoteSettings(ctx);
+        if (remote != null && remote.containsKey(KEY_SWIPE_HANDLE_ENABLED)) {
+            return "1".equals(remote.get(KEY_SWIPE_HANDLE_ENABLED));
+        }
+        SharedPreferences prefs = getPrefs(ctx);
+        if (prefs.contains(KEY_SWIPE_HANDLE_ENABLED)) {
+            return prefs.getBoolean(KEY_SWIPE_HANDLE_ENABLED, false);
+        }
+        return getPopupPresentation(ctx) == POPUP_PRESENTATION_SWIPE_HANDLE;
+    }
+
+    public static void setSwipeHandleEnabled(Context ctx, boolean enabled) {
+        getPrefs(ctx).edit().putBoolean(KEY_SWIPE_HANDLE_ENABLED, enabled).apply();
     }
 
     public static int getSwipeHandleLength(Context ctx) {
