@@ -26,6 +26,7 @@ public class ModuleSettings {
     public static final String KEY_SWIPE_HANDLE_THICKNESS = "swipe_handle_thickness_dp";
     public static final String KEY_SWIPE_HANDLE_BOTTOM_MARGIN = "swipe_handle_bottom_margin_dp";
     public static final String KEY_DEBUG_LOGGING_ENABLED = "debug_logging_enabled";
+    public static final String DEBUG_REMOTE_PREFS = "morebubblebutton_diagnostics";
     public static final String KEY_DEBUG_FULLSCREEN_NOTIFICATION_BUTTON = "debug_fullscreen_notification_button";
     public static final String KEY_DEBUG_LOG_FOLDER_URI = "debug_log_folder_uri";
 
@@ -40,6 +41,11 @@ public class ModuleSettings {
     private static final long REMOTE_CACHE_MS = 250L;
     private static volatile long sRemoteCacheAt;
     private static volatile Map<String, String> sRemoteCache;
+    private static volatile SharedPreferences sDebugRemotePrefs;
+
+    public static void setDebugRemotePreferences(SharedPreferences preferences) {
+        sDebugRemotePrefs = preferences;
+    }
 
     private static SharedPreferences getPrefs(Context ctx) {
         return ctx.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
@@ -231,6 +237,16 @@ public class ModuleSettings {
     }
 
     public static boolean isDebugLoggingEnabled(Context ctx) {
+        if (!isModuleContext(ctx)) {
+            SharedPreferences remote = sDebugRemotePrefs;
+            if (remote != null && remote.contains(KEY_DEBUG_LOGGING_ENABLED)) {
+                try {
+                    return remote.getBoolean(KEY_DEBUG_LOGGING_ENABLED, false);
+                } catch (Throwable ignored) {
+                    // Preserve the existing provider fallback for frameworks without remote prefs.
+                }
+            }
+        }
         return getBoolean(ctx, KEY_DEBUG_LOGGING_ENABLED, false);
     }
 
