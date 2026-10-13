@@ -53,6 +53,8 @@ public class SettingsProvider extends ContentProvider {
         add(cursor, ModuleSettings.KEY_SWIPE_HANDLE_BOTTOM_MARGIN,
                 prefs.getInt(ModuleSettings.KEY_SWIPE_HANDLE_BOTTOM_MARGIN,
                         ModuleSettings.DEFAULT_SWIPE_HANDLE_BOTTOM_MARGIN_DP));
+        add(cursor, ModuleSettings.KEY_DEBUG_LOGGING_ENABLED,
+                prefs.getBoolean(ModuleSettings.KEY_DEBUG_LOGGING_ENABLED, false));
         return cursor;
     }
 

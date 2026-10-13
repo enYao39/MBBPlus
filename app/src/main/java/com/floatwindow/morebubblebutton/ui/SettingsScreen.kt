@@ -2,9 +2,12 @@ package com.floatwindow.morebubblebutton.ui
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -63,6 +66,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,10 +79,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.floatwindow.morebubblebutton.BuildConfig
+import com.floatwindow.morebubblebutton.DebugLogExporter
 import com.floatwindow.morebubblebutton.ModuleSettings
 import com.floatwindow.morebubblebutton.MoreBubbleHookModule
 import com.floatwindow.morebubblebutton.R
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
@@ -114,6 +120,31 @@ fun SettingsScreen() {
     var sliderY by remember { mutableFloatStateOf(ModuleSettings.getPosY(ctx).toFloat()) }
     var rootCheckKey by remember { mutableIntStateOf(0) }
     var rootAccess by remember { mutableStateOf<Boolean?>(null) }
+    var debugLoggingEnabled by remember {
+        mutableStateOf(ModuleSettings.isDebugLoggingEnabled(ctx))
+    }
+    var debugLogFolderUri by remember {
+        mutableStateOf(ModuleSettings.getDebugLogFolderUri(ctx))
+    }
+    var exportingLogs by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
+    val logFolderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                ctx.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                debugLogFolderUri = uri.toString()
+                ModuleSettings.setDebugLogFolderUri(ctx, uri.toString())
+                Toast.makeText(ctx, R.string.debug_log_folder_saved, Toast.LENGTH_SHORT).show()
+            } catch (_: Throwable) {
+                Toast.makeText(ctx, R.string.debug_log_folder_failed, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     LaunchedEffect(rootCheckKey) {
         rootAccess = null
@@ -416,6 +447,79 @@ fun SettingsScreen() {
                         Icon(Icons.Default.Refresh, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text(stringResource(R.string.restart_button))
+                    }
+                }
+            }
+        }
+
+        item { SectionHeading(Icons.Default.Build, R.string.section_diagnostics) }
+        item {
+            SettingsCard {
+                Column {
+                    PreferenceSwitchRow(
+                        icon = Icons.Default.Build,
+                        title = stringResource(R.string.debug_logging_title),
+                        summary = stringResource(R.string.debug_logging_summary),
+                        checked = debugLoggingEnabled,
+                        onCheckedChange = {
+                            debugLoggingEnabled = it
+                            ModuleSettings.setDebugLoggingEnabled(ctx, it)
+                        }
+                    )
+                    PreferenceDivider()
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Text(
+                            text = stringResource(
+                                if (debugLogFolderUri == null) R.string.debug_log_folder_missing
+                                else R.string.debug_log_folder_selected
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        OutlinedButton(
+                            onClick = { logFolderPicker.launch(null) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(stringResource(R.string.debug_log_choose_folder))
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = stringResource(R.string.debug_log_privacy_note),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Button(
+                            onClick = {
+                                val savedUri = debugLogFolderUri ?: return@Button
+                                exportingLogs = true
+                                coroutineScope.launch {
+                                    val result = withContext(Dispatchers.IO) {
+                                        DebugLogExporter.export(ctx, Uri.parse(savedUri))
+                                    }
+                                    exportingLogs = false
+                                    Toast.makeText(
+                                        ctx,
+                                        if (result.success) {
+                                            ctx.getString(R.string.debug_log_export_success, result.fileName)
+                                        } else {
+                                            ctx.getString(R.string.debug_log_export_failed, result.error)
+                                        },
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = debugLoggingEnabled && debugLogFolderUri != null && !exportingLogs
+                        ) {
+                            Text(
+                                stringResource(
+                                    if (exportingLogs) R.string.debug_log_exporting
+                                    else R.string.debug_log_export_button
+                                )
+                            )
+                        }
                     }
                 }
             }
