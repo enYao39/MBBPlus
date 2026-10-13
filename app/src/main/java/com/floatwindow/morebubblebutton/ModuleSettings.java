@@ -25,6 +25,8 @@ public class ModuleSettings {
     public static final String KEY_SWIPE_HANDLE_LENGTH = "swipe_handle_length_dp";
     public static final String KEY_SWIPE_HANDLE_THICKNESS = "swipe_handle_thickness_dp";
     public static final String KEY_SWIPE_HANDLE_BOTTOM_MARGIN = "swipe_handle_bottom_margin_dp";
+    public static final String KEY_DEBUG_LOGGING_ENABLED = "debug_logging_enabled";
+    public static final String KEY_DEBUG_LOG_FOLDER_URI = "debug_log_folder_uri";
 
     public static final int OPEN_MODE_BUBBLE = 0;
     public static final int OPEN_MODE_FREEFORM = 1;
@@ -225,6 +227,22 @@ public class ModuleSettings {
     public static void setSwipeHandleBottomMargin(Context ctx, int value) {
         getPrefs(ctx).edit().putInt(KEY_SWIPE_HANDLE_BOTTOM_MARGIN,
                 clamp(value, -10, 24)).apply();
+    }
+
+    public static boolean isDebugLoggingEnabled(Context ctx) {
+        return getBoolean(ctx, KEY_DEBUG_LOGGING_ENABLED, false);
+    }
+
+    public static void setDebugLoggingEnabled(Context ctx, boolean enabled) {
+        getPrefs(ctx).edit().putBoolean(KEY_DEBUG_LOGGING_ENABLED, enabled).apply();
+    }
+
+    public static String getDebugLogFolderUri(Context ctx) {
+        return getPrefs(ctx).getString(KEY_DEBUG_LOG_FOLDER_URI, null);
+    }
+
+    public static void setDebugLogFolderUri(Context ctx, String uri) {
+        getPrefs(ctx).edit().putString(KEY_DEBUG_LOG_FOLDER_URI, uri).apply();
     }
 
     private static int clampPercent(int v) {

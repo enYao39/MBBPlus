@@ -10,6 +10,7 @@
     <string name="section_heads_up">Heads-up popup</string>
     <string name="section_position">Button position</string>
     <string name="section_actions">Actions</string>
+    <string name="section_diagnostics">Diagnostics</string>
     <string name="section_about">About</string>
     <string name="feature_menu_title">Task card menu</string>
     <string name="feature_menu_summary">Show Bubble in the menu opened from a task card icon.</string>
@@ -60,6 +61,18 @@
     <string name="restart_button">Restart launcher &amp; System UI</string>
     <string name="restart_success">Restart command sent.</string>
     <string name="restart_failed">Could not restart Launcher/System UI. Check root permission.</string>
+    <string name="debug_logging_title">Detailed debug logging</string>
+    <string name="debug_logging_summary">When enabled, detailed module events are written to logcat. Warnings and errors remain available when disabled.</string>
+    <string name="debug_log_folder_missing">Choose a folder where diagnostic ZIP files will be saved.</string>
+    <string name="debug_log_folder_selected">A save folder is selected.</string>
+    <string name="debug_log_choose_folder">Choose save folder</string>
+    <string name="debug_log_folder_saved">Log save folder selected.</string>
+    <string name="debug_log_folder_failed">Could not keep access to that folder. Please choose it again.</string>
+    <string name="debug_log_privacy_note">The ZIP includes Android logcat and kernel dmesg and may contain notification text, app activity, or device details. Review it before sharing. Root access is requested when saving.</string>
+    <string name="debug_log_export_button">Save logs as ZIP</string>
+    <string name="debug_log_exporting">Collecting and compressing logs…</string>
+    <string name="debug_log_export_success">Saved %1$s</string>
+    <string name="debug_log_export_failed">Could not save logs: %1$s</string>
     <string name="root_status_title">Root permission</string>
     <string name="root_status_checking">Checking root access…</string>
     <string name="root_status_granted">Granted. The restart action is available.</string>

@@ -17,7 +17,6 @@ import android.os.Looper;
 import android.os.Parcel;
 import android.os.SystemClock;
 import android.os.UserHandle;
-import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
