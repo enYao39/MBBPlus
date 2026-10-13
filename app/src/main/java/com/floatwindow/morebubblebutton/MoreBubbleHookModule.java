@@ -2998,7 +2998,7 @@ public class MoreBubbleHookModule extends XposedModule {
     // ==================== 气泡触发 ====================
 
     private void onBubbleButtonClick(View actionsView) {
-        Object rv = findRecentsViewAncestor(actionsView);
+        Object rv = findVisibleRecentsView(actionsView);
         if (rv == null || !isActionBarInVisibleRecents(actionsView, rv)) {
             Log.i(TAG, "Ignore bottom action bar click outside visible RecentsView");
             return;
@@ -3025,19 +3025,40 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) { Log.e(TAG, "onBubbleButtonClick: " + t.getMessage()); }
     }
 
-    private Object findRecentsViewAncestor(View view) {
+    private Object findVisibleRecentsView(View view) {
         if (view == null || mLauncherClassLoader == null) return null;
         try {
             Class<?> recentsViewClass = mLauncherClassLoader.loadClass(
                     "com.android.quickstep.views.RecentsView");
+
+            // Some Launcher builds place OverviewActionsView beside RecentsView rather
+            // than inside it. First inspect the clicked view's ancestors, then search
+            // only its own window root for the currently visible RecentsView.
             View current = view;
             while (current != null) {
-                if (recentsViewClass.isInstance(current)) return current;
+                if (recentsViewClass.isInstance(current)
+                        && current.isShown() && current.isAttachedToWindow()) return current;
                 current = current.getParent() instanceof View
                         ? (View) current.getParent() : null;
             }
+            View root = view.getRootView();
+            return root != null ? findVisibleViewInTree(root, recentsViewClass) : null;
         } catch (Throwable t) {
             Log.w(TAG, "Find clicked button RecentsView: " + t.getMessage());
+        }
+        return null;
+    }
+
+    private View findVisibleViewInTree(View view, Class<?> targetClass) {
+        if (targetClass.isInstance(view) && view.isShown() && view.isAttachedToWindow()) {
+            return view;
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View found = findVisibleViewInTree(group.getChildAt(i), targetClass);
+                if (found != null) return found;
+            }
         }
         return null;
     }
@@ -3045,7 +3066,8 @@ public class MoreBubbleHookModule extends XposedModule {
     private static boolean isActionBarInVisibleRecents(View actionsView, Object recentsView) {
         if (!(recentsView instanceof View) || actionsView == null) return false;
         View recents = (View) recentsView;
-        return actionsView.isShown() && recents.isShown() && recents.isAttachedToWindow();
+        return actionsView.isShown() && actionsView.isAttachedToWindow()
+                && recents.isShown() && recents.isAttachedToWindow();
     }
 
     private boolean openTaskFromRecents(Context ctx, Intent intent, Object task, int userId) {
