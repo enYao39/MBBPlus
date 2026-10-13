@@ -70,6 +70,13 @@ public class MoreBubbleHookModule extends XposedModule {
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
+        try {
+            ModuleSettings.setDebugRemotePreferences(
+                    getRemotePreferences(ModuleSettings.DEBUG_REMOTE_PREFS));
+        } catch (Throwable t) {
+            Log.w(TAG, "Xposed Remote Preferences unavailable for debug switch: "
+                    + t.getClass().getSimpleName());
+        }
         Log.i(TAG, "MoreBubbleModule: " + param.getProcessName() + " | API " + getApiVersion());
     }
 
@@ -2617,7 +2624,8 @@ public class MoreBubbleHookModule extends XposedModule {
                                 + " selectedKey=" + lookup.selectedKey
                                 + " matchedKey=" + lookup.matchedKey
                                 + " bubbleClass=" + lookup.bubbleClass
-                                + " intentGetter=" + lookup.intentGetter);
+                                + " intentSource=" + lookup.intentGetter
+                                + (delayMs == 300L ? " intentMembers=" + lookup.intentMembers : ""));
                         if (lookup.intent == null) {
                             // Keep the precise failure reason above so a missing snapshot cannot
                             // be mistaken for proof that the app Bubble/task does not exist.
@@ -2700,6 +2708,7 @@ public class MoreBubbleHookModule extends XposedModule {
         String matchedKey = "none";
         String bubbleClass = "none";
         String intentGetter = "none";
+        String intentMembers = "none";
     }
 
     private static ControllerBubbleIntentResult readControllerAppBubbleIntent(
@@ -2755,20 +2764,7 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             result.matchedKey = String.valueOf(getBubbleKey(bubble));
             result.bubbleClass = bubble.getClass().getName();
-            Method getIntent = findMethodSystemUi(bubble.getClass(), "getAppBubbleIntent");
-            if (getIntent != null) {
-                result.intentGetter = "getAppBubbleIntent";
-                Object intent = getIntent.invoke(bubble);
-                if (intent instanceof Intent) result.intent = (Intent) intent;
-            } else {
-                java.lang.reflect.Field appIntentField = findFieldSystemUi(bubble.getClass(), "mAppIntent");
-                if (appIntentField != null) {
-                    result.intentGetter = "mAppIntent-field";
-                    appIntentField.setAccessible(true);
-                    Object intent = appIntentField.get(bubble);
-                    if (intent instanceof Intent) result.intent = (Intent) intent;
-                }
-            }
+            inspectBubbleIntentAccessors(bubble, result);
             result.status = result.intent == null
                     ? ("none".equals(result.intentGetter) ? "app-intent-accessor-missing" : "app-intent-null")
                     : "ok";
@@ -2782,6 +2778,68 @@ public class MoreBubbleHookModule extends XposedModule {
     private static Object getBubbleKey(Object bubble) {
         Object key = invokeSystemUi(bubble, "getKey");
         return key != null ? key : getFieldSystemUi(bubble, "mKey");
+    }
+
+    private static void inspectBubbleIntentAccessors(Object bubble, ControllerBubbleIntentResult result) {
+        java.util.ArrayList<String> members = new java.util.ArrayList<>();
+        Intent fallbackIntent = null;
+        String fallbackSource = "none";
+        for (Class<?> type = bubble.getClass(); type != null; type = type.getSuperclass()) {
+            for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                if (!Intent.class.isAssignableFrom(field.getType())
+                        && !PendingIntent.class.isAssignableFrom(field.getType())) continue;
+                members.add("field:" + field.getName() + ":" + field.getType().getSimpleName());
+                try {
+                    field.setAccessible(true);
+                    Object value = field.get(bubble);
+                    Intent candidate = value instanceof Intent ? (Intent) value
+                            : value instanceof PendingIntent ? getPendingIntentIntent((PendingIntent) value) : null;
+                    if (candidate == null) continue;
+                    boolean preferred = field.getName().toLowerCase(Locale.ROOT).contains("app");
+                    if (preferred || fallbackIntent == null) {
+                        fallbackIntent = candidate;
+                        fallbackSource = "field:" + field.getName();
+                    }
+                } catch (Throwable t) {
+                    members.add("field-read-failed:" + field.getName() + ":" + t.getClass().getSimpleName());
+                }
+            }
+            for (Method method : type.getDeclaredMethods()) {
+                if (method.getParameterCount() != 0
+                        || (!Intent.class.isAssignableFrom(method.getReturnType())
+                        && !PendingIntent.class.isAssignableFrom(method.getReturnType()))
+                        || !method.getName().toLowerCase(Locale.ROOT).contains("intent")) continue;
+                members.add("method:" + method.getName() + "():" + method.getReturnType().getSimpleName());
+                try {
+                    method.setAccessible(true);
+                    Object value = method.invoke(bubble);
+                    Intent candidate = value instanceof Intent ? (Intent) value
+                            : value instanceof PendingIntent ? getPendingIntentIntent((PendingIntent) value) : null;
+                    if (candidate == null) continue;
+                    boolean preferred = method.getName().toLowerCase(Locale.ROOT).contains("app");
+                    if (preferred || fallbackIntent == null) {
+                        fallbackIntent = candidate;
+                        fallbackSource = "method:" + method.getName();
+                    }
+                } catch (Throwable t) {
+                    members.add("method-call-failed:" + method.getName() + ":" + t.getClass().getSimpleName());
+                }
+            }
+        }
+        result.intentMembers = members.isEmpty() ? "none" : String.join(",", members);
+        result.intent = fallbackIntent;
+        result.intentGetter = fallbackSource;
+    }
+
+    private static Intent getPendingIntentIntent(PendingIntent pendingIntent) {
+        if (pendingIntent == null) return null;
+        try {
+            Method getter = findMethodSystemUi(pendingIntent.getClass(), "getIntent");
+            Object value = getter != null ? getter.invoke(pendingIntent) : null;
+            return value instanceof Intent ? (Intent) value : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static void logIntentComparison(Context context, String label, Intent submitted, Intent observed) {
