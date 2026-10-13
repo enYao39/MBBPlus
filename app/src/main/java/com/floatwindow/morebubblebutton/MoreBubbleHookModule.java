@@ -2607,18 +2607,27 @@ public class MoreBubbleHookModule extends XposedModule {
                 if (!isDebugLoggingEnabled(context)) return;
                 try {
                     if (controller != null && bubbleKey != null) {
-                        Intent adoptedIntent = readControllerAppBubbleIntent(controller, bubbleKey);
-                        if (adoptedIntent == null) {
-                            logDetailedInfo(context, reason + ": Bubble Controller intent snapshot api=" + api
-                                    + " elapsedMs=" + delayMs + " bubbleKey=" + bubbleKey
-                                    + " result=app-bubble-intent-unavailable");
+                        ControllerBubbleIntentResult lookup = readControllerAppBubbleIntent(controller, bubbleKey);
+                        logDetailedInfo(context, reason + ": Bubble Controller lookup api=" + api
+                                + " elapsedMs=" + delayMs + " bubbleKey=" + bubbleKey
+                                + " result=" + lookup.status
+                                + " bubbleData=" + lookup.bubbleDataClass
+                                + " lookupMethod=" + lookup.lookupMethod
+                                + " stackCount=" + lookup.stackBubbleCount
+                                + " selectedKey=" + lookup.selectedKey
+                                + " matchedKey=" + lookup.matchedKey
+                                + " bubbleClass=" + lookup.bubbleClass
+                                + " intentGetter=" + lookup.intentGetter);
+                        if (lookup.intent == null) {
+                            // Keep the precise failure reason above so a missing snapshot cannot
+                            // be mistaken for proof that the app Bubble/task does not exist.
                         } else {
                             logDetailedInfo(context, reason + ": Bubble Controller intent snapshot api=" + api
                                     + " elapsedMs=" + delayMs + " bubbleKey=" + bubbleKey
-                                    + " adopted=" + summarizeIntent(adoptedIntent));
-                            logIntentDetails(context, reason + ": Bubble Controller adopted intent", adoptedIntent);
+                                    + " adopted=" + summarizeIntent(lookup.intent));
+                            logIntentDetails(context, reason + ": Bubble Controller adopted intent", lookup.intent);
                             logIntentComparison(context, reason + ": submitted vs Bubble Controller", submittedIntent,
-                                    adoptedIntent);
+                                    lookup.intent);
                         }
                     }
                     ActivityManager activityManager = (ActivityManager)
@@ -2681,28 +2690,98 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    private static Intent readControllerAppBubbleIntent(Object controller, String bubbleKey) {
+    private static final class ControllerBubbleIntentResult {
+        Intent intent;
+        String status = "unknown";
+        String bubbleDataClass = "none";
+        String lookupMethod = "none";
+        String stackBubbleCount = "unavailable";
+        String selectedKey = "none";
+        String matchedKey = "none";
+        String bubbleClass = "none";
+        String intentGetter = "none";
+    }
+
+    private static ControllerBubbleIntentResult readControllerAppBubbleIntent(
+            Object controller, String bubbleKey) {
+        ControllerBubbleIntentResult result = new ControllerBubbleIntentResult();
         try {
             Object bubbleData = getFieldSystemUi(controller, "mBubbleData");
-            if (bubbleData == null) return null;
+            if (bubbleData == null) {
+                result.status = findFieldSystemUi(controller.getClass(), "mBubbleData") == null
+                        ? "bubble-data-field-missing" : "bubble-data-null";
+                return result;
+            }
+            result.bubbleDataClass = bubbleData.getClass().getName();
             Object bubble = null;
             Method byKey = findMethodSystemUi(bubbleData.getClass(), "getBubbleInStackWithKey", String.class);
-            if (byKey != null) bubble = byKey.invoke(bubbleData, bubbleKey);
+            if (byKey != null) {
+                result.lookupMethod = "getBubbleInStackWithKey";
+                bubble = byKey.invoke(bubbleData, bubbleKey);
+            }
+            Object bubbles = null;
+            Method getBubbles = findMethodSystemUi(bubbleData.getClass(), "getBubbles");
+            if (getBubbles != null) {
+                bubbles = getBubbles.invoke(bubbleData);
+                if (bubbles instanceof java.util.Collection<?>) {
+                    result.stackBubbleCount = Integer.toString(((java.util.Collection<?>) bubbles).size());
+                    if (bubble == null) {
+                        for (Object candidate : (java.util.Collection<?>) bubbles) {
+                            String candidateKey = String.valueOf(getBubbleKey(candidate));
+                            if (bubbleKey.equals(candidateKey)) {
+                                bubble = candidate;
+                                result.lookupMethod = "getBubbles-match";
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             if (bubble == null) {
                 Method selected = findMethodSystemUi(bubbleData.getClass(), "getSelectedBubble");
                 if (selected != null) {
                     Object candidate = selected.invoke(bubbleData);
-                    Object selectedKey = candidate != null ? invokeSystemUi(candidate, "getKey") : null;
-                    if (candidate != null && bubbleKey.equals(selectedKey)) bubble = candidate;
+                    result.selectedKey = candidate != null ? String.valueOf(getBubbleKey(candidate)) : "none";
+                    if (candidate != null && bubbleKey.equals(getBubbleKey(candidate))) {
+                        bubble = candidate;
+                        result.lookupMethod = "getSelectedBubble-match";
+                    }
                 }
             }
-            if (bubble == null) return null;
-            Object intent = invokeSystemUi(bubble, "getAppBubbleIntent");
-            if (!(intent instanceof Intent)) intent = getFieldSystemUi(bubble, "mAppIntent");
-            return intent instanceof Intent ? (Intent) intent : null;
+            if (bubble == null) {
+                result.status = byKey == null && getBubbles == null
+                        ? "bubble-lookup-methods-missing" : "bubble-key-not-found";
+                return result;
+            }
+            result.matchedKey = String.valueOf(getBubbleKey(bubble));
+            result.bubbleClass = bubble.getClass().getName();
+            Method getIntent = findMethodSystemUi(bubble.getClass(), "getAppBubbleIntent");
+            if (getIntent != null) {
+                result.intentGetter = "getAppBubbleIntent";
+                Object intent = getIntent.invoke(bubble);
+                if (intent instanceof Intent) result.intent = (Intent) intent;
+            } else {
+                java.lang.reflect.Field appIntentField = findFieldSystemUi(bubble.getClass(), "mAppIntent");
+                if (appIntentField != null) {
+                    result.intentGetter = "mAppIntent-field";
+                    appIntentField.setAccessible(true);
+                    Object intent = appIntentField.get(bubble);
+                    if (intent instanceof Intent) result.intent = (Intent) intent;
+                }
+            }
+            result.status = result.intent == null
+                    ? ("none".equals(result.intentGetter) ? "app-intent-accessor-missing" : "app-intent-null")
+                    : "ok";
+            return result;
         } catch (Throwable t) {
-            return null;
+            result.status = "reflection-failed:" + t.getClass().getSimpleName();
+            return result;
         }
+    }
+
+    private static Object getBubbleKey(Object bubble) {
+        Object key = invokeSystemUi(bubble, "getKey");
+        return key != null ? key : getFieldSystemUi(bubble, "mKey");
     }
 
     private static void logIntentComparison(Context context, String label, Intent submitted, Intent observed) {
