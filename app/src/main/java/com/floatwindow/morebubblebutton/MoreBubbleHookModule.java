@@ -3,6 +3,8 @@ package com.floatwindow.morebubblebutton;
 import android.app.Notification;
 import android.app.ActivityOptions;
 import android.app.ActivityManager;
+import android.app.Activity;
+import android.app.Instrumentation;
 import android.app.PendingIntent;
 import android.annotation.SuppressLint;
 import android.content.ComponentName;
@@ -83,6 +85,138 @@ public class MoreBubbleHookModule extends XposedModule {
             // package name or through the shared "android" process alias. Hook whichever
             // callback arrives first, and never install the same hooks twice.
             hookSystemUiOnce(param.getDefaultClassLoader(), pkg);
+        } else if (!"com.floatwindow.morebubblebutton".equals(pkg)) {
+            // LSPosed only loads this module in packages enabled in its scope. Use the
+            // same generic Activity observer for any user-selected target application.
+            hookActivityIntentDiagnostics(param);
+        }
+    }
+
+    /** Observe routed Activity intents in any application selected in the LSPosed scope. */
+    private void hookActivityIntentDiagnostics(PackageLoadedParam param) {
+        String packageName = param.getPackageName();
+        ClassLoader classLoader = param.getDefaultClassLoader();
+        if (packageName == null || classLoader == null) return;
+        try {
+            Class<?> instrumentationClass = classLoader.loadClass(Instrumentation.class.getName());
+            int installed = 0;
+            for (Method method : instrumentationClass.getDeclaredMethods()) {
+                String name = method.getName();
+                Class<?>[] types = method.getParameterTypes();
+                boolean onCreate = "callActivityOnCreate".equals(name)
+                        && types.length >= 2 && types[0] == Activity.class
+                        && android.os.Bundle.class.isAssignableFrom(types[1]);
+                boolean onNewIntent = "callActivityOnNewIntent".equals(name)
+                        && types.length >= 2 && types[0] == Activity.class
+                        && Intent.class.isAssignableFrom(types[1]);
+                if (!onCreate && !onNewIntent) continue;
+                method.setAccessible(true);
+                hook(method).intercept(chain -> {
+                    Activity activity = chain.getArg(0) instanceof Activity
+                            ? (Activity) chain.getArg(0) : null;
+                    if (activity == null || !isDebugLoggingEnabled(activity)) {
+                        return chain.proceed();
+                    }
+                    Intent deliveredIntent = onNewIntent && chain.getArg(1) instanceof Intent
+                            ? (Intent) chain.getArg(1) : null;
+                    Intent currentBefore = null;
+                    try { currentBefore = activity.getIntent(); } catch (Throwable ignored) {}
+                    if (onNewIntent && shouldObserveActivityIntent(activity, deliveredIntent,
+                            currentBefore)) {
+                        logActivityIntent(activity, packageName, "onNewIntent.received", deliveredIntent);
+                        logActivityIntent(activity, packageName, "onNewIntent.currentBefore", currentBefore);
+                    }
+                    Object result = chain.proceed();
+                    Intent currentAfter = null;
+                    try { currentAfter = activity.getIntent(); } catch (Throwable ignored) {}
+                    if (onCreate && shouldObserveActivityIntent(activity, currentAfter, null)) {
+                        logActivityIntent(activity, packageName, "onCreate.current", currentAfter);
+                    } else if (onNewIntent && shouldObserveActivityIntent(activity, deliveredIntent,
+                            currentAfter)) {
+                        logActivityIntent(activity, packageName, "onNewIntent.currentAfter", currentAfter);
+                    }
+                    return result;
+                });
+                installed++;
+            }
+            Log.i(TAG, "Activity Intent diagnostics armed for scoped package " + packageName
+                    + " methods=" + installed);
+        } catch (Throwable t) {
+            Log.w(TAG, "Activity Intent diagnostics unavailable for " + packageName
+                    + ": " + t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
+    }
+
+    private static boolean shouldObserveActivityIntent(Activity activity, Intent... intents) {
+        String activityName = activity.getClass().getName().toLowerCase(Locale.ROOT);
+        if (activityName.contains("deeplink") || activityName.contains("deep_link")
+                || activityName.contains("chat") || activityName.contains("conversation")
+                || activityName.contains("message") || activityName.contains("dialog")) {
+            return true;
+        }
+        if (intents != null) {
+            for (Intent intent : intents) {
+                if (intent != null && (intent.getData() != null
+                        || Intent.ACTION_VIEW.equals(intent.getAction()))) return true;
+            }
+        }
+        return false;
+    }
+
+    private static void logActivityIntent(Activity activity, String packageName,
+            String stage, Intent intent) {
+        try {
+            String component = activity.getClass().getName();
+            int taskId = activity.getTaskId();
+            boolean taskRoot = activity.isTaskRoot();
+            String intentSummary = intent == null ? "null"
+                    : "action=" + intent.getAction()
+                    + " data=" + limitDebugValue(intent.getDataString())
+                    + " identifier=" + intent.getIdentifier()
+                    + " flags=0x" + Integer.toHexString(intent.getFlags())
+                    + " categories=" + intent.getCategories()
+                    + " extras=" + summarizeRoutingExtras(intent);
+            logDetailedInfo(activity, "Activity Intent observed package=" + packageName
+                    + " stage=" + stage + " activity=" + component
+                    + " taskId=" + taskId + " taskRoot=" + taskRoot
+                    + " intent=" + intentSummary);
+        } catch (Throwable t) {
+            logDetailedInfo(activity, "Activity Intent observation failed package=" + packageName
+                    + " stage=" + stage + " activity=" + activity.getClass().getName()
+                    + " error=" + t.getClass().getSimpleName());
+        }
+    }
+
+    /** Include extra names and route-like scalar values while omitting message payloads. */
+    private static String summarizeRoutingExtras(Intent intent) {
+        try {
+            android.os.Bundle extras = intent.getExtras();
+            if (extras == null || extras.isEmpty()) return "[]";
+            StringBuilder result = new StringBuilder("keys=")
+                    .append(new java.util.TreeSet<>(extras.keySet())).append(" routeValues={");
+            boolean first = true;
+            for (String name : new java.util.TreeSet<>(extras.keySet())) {
+                String lower = name.toLowerCase(Locale.ROOT);
+                if (!(lower.contains("conversation") || lower.contains("chat")
+                        || lower.contains("dialog") || lower.contains("peer")
+                        || lower.contains("user") || lower.contains("target")
+                        || lower.contains("route") || lower.contains("deeplink")
+                        || lower.contains("deep_link") || lower.contains("uri")
+                        || lower.contains("url") || lower.endsWith("_id")
+                        || "id".equals(lower))) continue;
+                if (lower.contains("body") || lower.contains("text") || lower.contains("message")
+                        || lower.contains("title") || lower.contains("payload")
+                        || lower.contains("token") || lower.contains("signature")) continue;
+                Object value;
+                try { value = extras.get(name); } catch (Throwable ignored) { continue; }
+                if (!(value instanceof String || value instanceof Number || value instanceof Boolean)) continue;
+                if (!first) result.append(", ");
+                result.append(name).append('=').append(limitDebugValue(String.valueOf(value)));
+                first = false;
+            }
+            return result.append('}').toString();
+        } catch (Throwable t) {
+            return "unavailable:" + t.getClass().getSimpleName();
         }
     }
 
