@@ -4,7 +4,6 @@ import android.app.Notification;
 import android.app.ActivityOptions;
 import android.app.ActivityManager;
 import android.app.Activity;
-import android.app.Instrumentation;
 import android.app.PendingIntent;
 import android.annotation.SuppressLint;
 import android.content.ComponentName;
@@ -50,6 +49,7 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam;
 public class MoreBubbleHookModule extends XposedModule {
     private static final String TAG = "MoreBubbleModule";
     private static View sSecondRow;
+    private static final Set<String> sActivityIntentDiagnosticPackages = ConcurrentHashMap.newKeySet();
     private ClassLoader mLauncherClassLoader;
     private static Object sBubblesManager;
     private static final String HEADS_UP_HANDLE_TAG = "more_bubble_heads_up_handle";
@@ -96,53 +96,84 @@ public class MoreBubbleHookModule extends XposedModule {
     private void hookActivityIntentDiagnostics(PackageLoadedParam param) {
         String packageName = param.getPackageName();
         ClassLoader classLoader = param.getDefaultClassLoader();
-        if (packageName == null || classLoader == null) return;
+        if (packageName == null || classLoader == null
+                || !sActivityIntentDiagnosticPackages.add(packageName)) return;
         try {
-            Class<?> instrumentationClass = classLoader.loadClass(Instrumentation.class.getName());
+            Class<?> activityThreadClass = classLoader.loadClass("android.app.ActivityThread");
             int installed = 0;
-            for (Method method : instrumentationClass.getDeclaredMethods()) {
+            boolean launchHookInstalled = false;
+            boolean newIntentHookInstalled = false;
+            for (Method method : activityThreadClass.getDeclaredMethods()) {
                 String name = method.getName();
                 Class<?>[] types = method.getParameterTypes();
-                boolean onCreate = "callActivityOnCreate".equals(name)
-                        && types.length >= 2 && types[0] == Activity.class
-                        && android.os.Bundle.class.isAssignableFrom(types[1]);
-                boolean onNewIntent = "callActivityOnNewIntent".equals(name)
-                        && types.length >= 2 && types[0] == Activity.class
-                        && Intent.class.isAssignableFrom(types[1]);
-                if (!onCreate && !onNewIntent) continue;
+                boolean launchActivity = "performLaunchActivity".equals(name)
+                        && types.length >= 1
+                        && "ActivityClientRecord".equals(types[0].getSimpleName());
+                boolean deliverNewIntent = "handleNewIntent".equals(name)
+                        && types.length >= 2
+                        && "ActivityClientRecord".equals(types[0].getSimpleName())
+                        && List.class.isAssignableFrom(types[1]);
+                if (!launchActivity && !deliverNewIntent) continue;
                 method.setAccessible(true);
                 hook(method).intercept(chain -> {
-                    Activity activity = chain.getArg(0) instanceof Activity
-                            ? (Activity) chain.getArg(0) : null;
-                    if (activity == null || !isDebugLoggingEnabled(activity)) {
-                        return chain.proceed();
-                    }
-                    Intent deliveredIntent = onNewIntent && chain.getArg(1) instanceof Intent
-                            ? (Intent) chain.getArg(1) : null;
-                    Intent currentBefore = null;
-                    try { currentBefore = activity.getIntent(); } catch (Throwable ignored) {}
-                    if (onNewIntent && shouldObserveActivityIntent(activity, deliveredIntent,
-                            currentBefore)) {
-                        logActivityIntent(activity, packageName, "onNewIntent.received", deliveredIntent);
-                        logActivityIntent(activity, packageName, "onNewIntent.currentBefore", currentBefore);
+                    if (deliverNewIntent) {
+                        Object activityObject = getFieldSystemUi(chain.getArg(0), "activity");
+                        Object delivered = chain.getArg(1);
+                        Activity activity = activityObject instanceof Activity
+                                ? (Activity) activityObject : null;
+                        Intent currentBefore = null;
+                        List<?> deliveredIntents = delivered instanceof List<?>
+                                ? new java.util.ArrayList<>((List<?>) delivered) : java.util.Collections.emptyList();
+                        boolean observe = activity != null && isDebugLoggingEnabled(activity);
+                        if (observe) {
+                            try { currentBefore = activity.getIntent(); } catch (Throwable ignored) {}
+                            for (Object item : deliveredIntents) {
+                                Intent receivedIntent = item instanceof Intent ? (Intent) item : null;
+                                if (!shouldObserveActivityIntent(activity, receivedIntent, currentBefore)) continue;
+                                logActivityIntent(activity, packageName,
+                                        "ActivityThread.handleNewIntent.received", receivedIntent);
+                                logActivityIntent(activity, packageName,
+                                        "ActivityThread.handleNewIntent.currentBefore", currentBefore);
+                            }
+                        }
+                        Object result = chain.proceed();
+                        if (observe) {
+                            Intent currentAfter = null;
+                            try { currentAfter = activity.getIntent(); } catch (Throwable ignored) {}
+                            if (shouldObserveActivityIntent(activity, currentAfter)) {
+                                logActivityIntent(activity, packageName,
+                                        "ActivityThread.handleNewIntent.currentAfter", currentAfter);
+                            }
+                        }
+                        return result;
                     }
                     Object result = chain.proceed();
-                    Intent currentAfter = null;
-                    try { currentAfter = activity.getIntent(); } catch (Throwable ignored) {}
-                    if (onCreate && shouldObserveActivityIntent(activity, currentAfter, null)) {
-                        logActivityIntent(activity, packageName, "onCreate.current", currentAfter);
-                    } else if (onNewIntent && shouldObserveActivityIntent(activity, deliveredIntent,
-                            currentAfter)) {
-                        logActivityIntent(activity, packageName, "onNewIntent.currentAfter", currentAfter);
+                    if (launchActivity && result instanceof Activity) {
+                        Activity activity = (Activity) result;
+                        Intent launchIntent = null;
+                        try { launchIntent = activity.getIntent(); } catch (Throwable ignored) {}
+                        if (isDebugLoggingEnabled(activity)
+                                && shouldObserveActivityIntent(activity, launchIntent)) {
+                            logActivityIntent(activity, packageName,
+                                    "ActivityThread.performLaunchActivity", launchIntent);
+                        }
                     }
                     return result;
                 });
                 installed++;
+                launchHookInstalled |= launchActivity;
+                newIntentHookInstalled |= deliverNewIntent;
             }
-            Log.i(TAG, "Activity Intent diagnostics armed for scoped package " + packageName
-                    + " methods=" + installed);
+            if (installed == 0 || !launchHookInstalled || !newIntentHookInstalled) {
+                Log.w(TAG, "ActivityThread Intent diagnostics incomplete for " + packageName
+                        + " hookedMethods=" + installed + " launch=" + launchHookInstalled
+                        + " newIntent=" + newIntentHookInstalled);
+            } else {
+                Log.i(TAG, "ActivityThread Intent diagnostics armed for scoped package " + packageName
+                        + " methods=" + installed);
+            }
         } catch (Throwable t) {
-            Log.w(TAG, "Activity Intent diagnostics unavailable for " + packageName
+            Log.w(TAG, "ActivityThread Intent diagnostics unavailable for " + packageName
                     + ": " + t.getClass().getSimpleName() + ": " + t.getMessage());
         }
     }
