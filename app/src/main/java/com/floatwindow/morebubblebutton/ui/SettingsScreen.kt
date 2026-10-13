@@ -123,6 +123,9 @@ fun SettingsScreen() {
     var debugLoggingEnabled by remember {
         mutableStateOf(ModuleSettings.isDebugLoggingEnabled(ctx))
     }
+    var debugFullscreenNotificationButtonEnabled by remember {
+        mutableStateOf(ModuleSettings.isDebugFullscreenNotificationButtonEnabled(ctx))
+    }
     var debugLogFolderUri by remember {
         mutableStateOf(ModuleSettings.getDebugLogFolderUri(ctx))
     }
@@ -466,6 +469,19 @@ fun SettingsScreen() {
                             ModuleSettings.setDebugLoggingEnabled(ctx, it)
                         }
                     )
+                    if (debugLoggingEnabled) {
+                        PreferenceDivider()
+                        PreferenceSwitchRow(
+                            icon = Icons.Default.Info,
+                            title = stringResource(R.string.debug_fullscreen_intent_title),
+                            summary = stringResource(R.string.debug_fullscreen_intent_summary),
+                            checked = debugFullscreenNotificationButtonEnabled,
+                            onCheckedChange = {
+                                debugFullscreenNotificationButtonEnabled = it
+                                ModuleSettings.setDebugFullscreenNotificationButtonEnabled(ctx, it)
+                            }
+                        )
+                    }
                     PreferenceDivider()
                     Column(modifier = Modifier.padding(20.dp)) {
                         Text(
