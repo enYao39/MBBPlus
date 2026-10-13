@@ -2751,6 +2751,10 @@ public class MoreBubbleHookModule extends XposedModule {
             button.setScaleType(imageSample.getScaleType());
             button.setPadding(sample.getPaddingLeft(), sample.getPaddingTop(),
                     sample.getPaddingRight(), sample.getPaddingBottom());
+            button.setMinimumWidth(sample.getMinimumWidth());
+            button.setMinimumHeight(sample.getMinimumHeight());
+            button.setMaxWidth(imageSample.getMaxWidth());
+            button.setMaxHeight(imageSample.getMaxHeight());
             android.graphics.drawable.Drawable background = sample.getBackground();
             if (background != null && background.getConstantState() != null) {
                 button.setBackground(background.getConstantState().newDrawable(
@@ -2759,8 +2763,16 @@ public class MoreBubbleHookModule extends XposedModule {
             button.setBackgroundTintList(sample.getBackgroundTintList());
             ViewGroup.LayoutParams sampleParams = sample.getLayoutParams();
             if (sampleParams != null) {
-                button.setLayoutParams(new LinearLayout.LayoutParams(
-                        sampleParams.width, sampleParams.height));
+                if (sampleParams instanceof LinearLayout.LayoutParams) {
+                    button.setLayoutParams(new LinearLayout.LayoutParams(
+                            (LinearLayout.LayoutParams) sampleParams));
+                } else if (sampleParams instanceof ViewGroup.MarginLayoutParams) {
+                    button.setLayoutParams(new LinearLayout.LayoutParams(
+                            (ViewGroup.MarginLayoutParams) sampleParams));
+                } else {
+                    button.setLayoutParams(new LinearLayout.LayoutParams(
+                            sampleParams.width, sampleParams.height));
+                }
             }
         } else {
             button.setLayoutParams(new LinearLayout.LayoutParams(
