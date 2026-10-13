@@ -7,6 +7,7 @@
     <string name="settings_language_auto">界面语言会跟随系统自动切换</string>
     <string name="section_recents">最近任务</string>
     <string name="section_notifications">通知</string>
+    <string name="section_heads_up">Heads-up 弹出通知</string>
     <string name="section_position">按钮位置</string>
     <string name="section_actions">操作</string>
     <string name="section_about">关于</string>
@@ -15,15 +16,13 @@
     <string name="feature_action_bar_title">底部操作栏</string>
     <string name="feature_action_bar_summary">在最近任务界面的底部操作栏显示“Bubble”。</string>
     <string name="feature_system_ui_title">通知气泡按钮</string>
-    <string name="feature_system_ui_summary">为可以打开应用的普通通知显示气泡按钮。</string>
+    <string name="feature_system_ui_summary">在支持的通知上显示 Bubble 按钮。</string>
+    <string name="feature_swipe_handle_title">下滑横条</string>
+    <string name="feature_swipe_handle_summary">在 Heads-up 弹出通知上添加横条，下滑即可打开通知目标。</string>
     <string name="open_mode_title">打开方式</string>
     <string name="open_mode_bubble">Bubble</string>
     <string name="open_mode_freeform">自由窗口</string>
     <string name="open_mode_summary">选择任务或通知的打开方式。自由窗口不可用时依次回退到 Bubble 和全屏。</string>
-    <string name="popup_presentation_title">Heads-up 操作方式</string>
-    <string name="popup_presentation_button">Bubble 按钮</string>
-    <string name="popup_presentation_handle">下滑横条</string>
-    <string name="popup_presentation_summary">Heads-up 中保留 Bubble 按钮并增加下滑横条。下滑横条即可打开。</string>
     <string name="swipe_handle_length">横条长度</string>
     <string name="swipe_handle_thickness">横条粗细</string>
     <string name="swipe_handle_length_hint">32dp 最短 · 96dp 最长</string>

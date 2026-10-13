@@ -81,7 +81,7 @@ fun SettingsScreen() {
     var actionBarEnabled by remember { mutableStateOf(ModuleSettings.isActionBarEnabled(ctx)) }
     var systemUiBubbleEnabled by remember { mutableStateOf(ModuleSettings.isSystemUiBubbleEnabled(ctx)) }
     var openMode by remember { mutableIntStateOf(ModuleSettings.getOpenMode(ctx)) }
-    var popupPresentation by remember { mutableIntStateOf(ModuleSettings.getPopupPresentation(ctx)) }
+    var swipeHandleEnabled by remember { mutableStateOf(ModuleSettings.isSwipeHandleEnabled(ctx)) }
     var swipeHandleLength by remember {
         mutableFloatStateOf(ModuleSettings.getSwipeHandleLength(ctx).toFloat())
     }
@@ -163,21 +163,23 @@ fun SettingsScreen() {
                         ModuleSettings.setOpenMode(ctx, it)
                     }
                 )
-                PreferenceDivider()
-                ChoicePreferenceRow(
-                    title = stringResource(R.string.popup_presentation_title),
-                    summary = stringResource(R.string.popup_presentation_summary),
-                    selected = popupPresentation,
-                    labels = listOf(
-                        stringResource(R.string.popup_presentation_button),
-                        stringResource(R.string.popup_presentation_handle)
-                    ),
-                    onSelected = {
-                        popupPresentation = it
-                        ModuleSettings.setPopupPresentation(ctx, it)
+            }
+        }
+
+        item { SectionHeading(Icons.Default.Settings, R.string.section_heads_up) }
+        item {
+            SettingsCard {
+                PreferenceSwitchRow(
+                    icon = Icons.Default.Notifications,
+                    title = stringResource(R.string.feature_swipe_handle_title),
+                    summary = stringResource(R.string.feature_swipe_handle_summary),
+                    checked = swipeHandleEnabled,
+                    onCheckedChange = {
+                        swipeHandleEnabled = it
+                        ModuleSettings.setSwipeHandleEnabled(ctx, it)
                     }
                 )
-                if (popupPresentation == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE) {
+                if (swipeHandleEnabled) {
                     PreferenceDivider()
                     Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
                         FineTuneSlider(

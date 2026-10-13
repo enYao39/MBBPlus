@@ -123,7 +123,7 @@ public class MoreBubbleHookModule extends XposedModule {
     private void hookSystemUi(ClassLoader cl) {
         Log.i(TAG, "Hooking SystemUI...");
         // 1. shouldShowBubbleButton: 让所有具备可打开入口的非锁屏通知显示按钮。
-        //    横条模式与 Heads-up 中的原生按钮互斥，但通知下拉列表仍保留按钮。
+        //    Bubble 按钮与 Heads-up 下滑横条由独立设置控制。
         Class<?> contentViewClass = null;
         try {
             contentViewClass = cl.loadClass(
@@ -744,9 +744,7 @@ public class MoreBubbleHookModule extends XposedModule {
         trackHeadsUpRow(row);
         Context ctx = host.getContext();
         try {
-            boolean enabled = ModuleSettings.isSystemUiBubbleEnabled(ctx)
-                    && ModuleSettings.getPopupPresentation(ctx)
-                    == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE;
+            boolean enabled = ModuleSettings.isSwipeHandleEnabled(ctx);
             Notification notification = getNotificationFromContentView(row);
             boolean validNotification = notification != null
                     && (notification.flags & Notification.FLAG_ONGOING_EVENT) == 0

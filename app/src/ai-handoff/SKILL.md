@@ -30,7 +30,9 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 
 - Bubble/Freeform 按钮在符合条件的非锁屏通知中始终保持显示。
 - 横条只存在于 Heads-up popup，不要添加到普通通知或锁屏布局。
-- Swipe 模式只额外叠加横条，不得隐藏或改变原生 Bubble/Freeform 按钮行为；下滑横条应与按钮使用同一打开和回退逻辑。
+- 通知 Bubble/Freeform 按钮与 Heads-up swipe handle 使用独立开关，可同时启用；关闭按钮时横条仍应按自身开关工作。
+- Swipe handle 只额外叠加在 Heads-up popup，不得隐藏或改变 Bubble/Freeform 按钮行为；下滑横条应与按钮使用同一打开和回退逻辑。
+- 新设置键 `swipe_handle_enabled` 必须兼容旧 `popup_presentation=1` 的偏好迁移；设置 Provider 也要提供迁移后的有效值给 SystemUI。
 - 横条底部间距范围为 `-10dp..24dp`；修改设置范围时必须同步更新 `ModuleSettings`、Compose 设置页、`SettingsProvider` 和中英文资源。
 - 中英文资源必须同步；英文采用 “Bubble” 和 “Freeform” 等短文案。
 - 设置项文案过长时优先缩短摘要或使用单独说明，不要让选择框被长字符串撑大。
