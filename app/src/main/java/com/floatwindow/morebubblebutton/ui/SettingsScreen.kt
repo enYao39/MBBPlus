@@ -5,6 +5,14 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +31,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Close
@@ -79,6 +89,14 @@ fun SettingsScreen() {
     val ctx = LocalContext.current
     var menuEnabled by remember { mutableStateOf(ModuleSettings.isMenuEnabled(ctx)) }
     var actionBarEnabled by remember { mutableStateOf(ModuleSettings.isActionBarEnabled(ctx)) }
+    var actionBarBubbleEnabled by remember {
+        mutableStateOf(ModuleSettings.isActionBarBubbleEnabled(ctx))
+    }
+    var actionBarFreeformEnabled by remember {
+        mutableStateOf(ModuleSettings.isActionBarFreeformEnabled(ctx))
+    }
+    var actionBarOrder by remember { mutableIntStateOf(ModuleSettings.getActionBarOrder(ctx)) }
+    var showActionBarSettings by remember { mutableStateOf(false) }
     var systemUiBubbleEnabled by remember { mutableStateOf(ModuleSettings.isSystemUiBubbleEnabled(ctx)) }
     var openMode by remember { mutableIntStateOf(ModuleSettings.getOpenMode(ctx)) }
     var swipeHandleEnabled by remember { mutableStateOf(ModuleSettings.isSwipeHandleEnabled(ctx)) }
@@ -101,12 +119,114 @@ fun SettingsScreen() {
         rootAccess = null
         rootAccess = withContext(Dispatchers.IO) { hasRootAccess() }
     }
+    BackHandler(enabled = showActionBarSettings) {
+        showActionBarSettings = false
+    }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
+    AnimatedContent(
+        targetState = showActionBarSettings,
+        transitionSpec = {
+            if (targetState) {
+                (slideInHorizontally(tween(220)) { it / 8 } + fadeIn(tween(220))) togetherWith
+                    (slideOutHorizontally(tween(180)) { -it / 12 } + fadeOut(tween(150)))
+            } else {
+                (slideInHorizontally(tween(220)) { -it / 8 } + fadeIn(tween(220))) togetherWith
+                    (slideOutHorizontally(tween(180)) { it / 12 } + fadeOut(tween(150)))
+            }
+        },
+        label = "bottom_action_settings_transition"
+    ) { showSettings ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+        if (showSettings) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showActionBarSettings = false }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = stringResource(R.string.navigate_back),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = stringResource(R.string.action_bar_settings_title),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+            item {
+                SettingsCard {
+                    PreferenceSwitchRow(
+                        icon = Icons.Default.Notifications,
+                        title = stringResource(R.string.action_bar_bubble_title),
+                        summary = stringResource(R.string.action_bar_bubble_summary),
+                        checked = actionBarBubbleEnabled,
+                        onCheckedChange = {
+                            actionBarBubbleEnabled = it
+                            ModuleSettings.setActionBarBubbleEnabled(ctx, it)
+                        }
+                    )
+                    PreferenceDivider()
+                    PreferenceSwitchRow(
+                        icon = Icons.Default.Settings,
+                        title = stringResource(R.string.action_bar_freeform_title),
+                        summary = stringResource(R.string.action_bar_freeform_summary),
+                        checked = actionBarFreeformEnabled,
+                        onCheckedChange = {
+                            actionBarFreeformEnabled = it
+                            ModuleSettings.setActionBarFreeformEnabled(ctx, it)
+                        }
+                    )
+                    PreferenceDivider()
+                    ChoicePreferenceRow(
+                        title = stringResource(R.string.action_bar_order_title),
+                        summary = stringResource(R.string.action_bar_order_summary),
+                        selected = actionBarOrder,
+                        labels = listOf(
+                            stringResource(R.string.action_bar_order_freeform_first),
+                            stringResource(R.string.action_bar_order_bubble_first)
+                        ),
+                        onSelected = {
+                            actionBarOrder = it
+                            ModuleSettings.setActionBarOrder(ctx, it)
+                        }
+                    )
+                    PreferenceDivider()
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Text(
+                            text = stringResource(R.string.section_position),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        ButtonPositionControls(
+                            ctx = ctx,
+                            positionMode = positionMode,
+                            setPositionMode = { positionMode = it },
+                            sliderX = sliderX,
+                            setSliderX = { sliderX = it },
+                            sliderY = sliderY,
+                            setSliderY = { sliderY = it }
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = stringResource(R.string.action_bar_native_row_note),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        } else {
         item { HeaderCard() }
 
         item { SectionHeading(Icons.Default.Build, R.string.section_recents) }
@@ -135,23 +255,12 @@ fun SettingsScreen() {
                 )
                 if (actionBarEnabled) {
                     PreferenceDivider()
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            text = stringResource(R.string.section_position),
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        ButtonPositionControls(
-                            ctx = ctx,
-                            positionMode = positionMode,
-                            setPositionMode = { positionMode = it },
-                            sliderX = sliderX,
-                            setSliderX = { sliderX = it },
-                            sliderY = sliderY,
-                            setSliderY = { sliderY = it }
-                        )
-                    }
+                    PreferenceNavigationRow(
+                        icon = Icons.Default.Settings,
+                        title = stringResource(R.string.action_bar_options_title),
+                        summary = stringResource(R.string.action_bar_options_summary),
+                        onClick = { showActionBarSettings = true }
+                    )
                 }
             }
         }
@@ -332,6 +441,8 @@ fun SettingsScreen() {
                     )
                 }
             }
+        }
+        }
         }
     }
 }
@@ -632,6 +743,51 @@ private fun PreferenceSwitchRow(
         }
         Spacer(modifier = Modifier.width(12.dp))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun PreferenceNavigationRow(
+    icon: ImageVector,
+    title: String,
+    summary: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Surface(
+            modifier = Modifier.size(42.dp),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.secondaryContainer
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.padding(10.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
