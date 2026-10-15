@@ -272,7 +272,6 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final Map<View, Object> sSwipeHandleRows = new WeakHashMap<>();
     private static volatile boolean sShadeOrQsExpanded;
     private static volatile boolean sQsFullscreen;
-    private static volatile Object sHeadsUpManagerInstance;
     // Tracks whether any row has reported being on the keyguard. This is a
     // coarse flag — it's set when setOnKeyguard(true) is called on ANY row,
     // and cleared when setOnKeyguard(false) is called. Used to prevent
@@ -765,23 +764,17 @@ public class MoreBubbleHookModule extends XposedModule {
             Class<?> managerClass = cl.loadClass(
                     "com.android.systemui.statusbar.notification.headsup.HeadsUpManagerImpl");
             Set<String> hooked = new HashSet<>();
-            Set<String> managerActivityMethods = new HashSet<>(java.util.Arrays.asList(
-                    "showNotification", "updateNotification", "onEntryAdded",
-                    "onEntryUpdated", "onEntryRemoved", "removeNotification"));
             for (Class<?> type = managerClass; type != null; type = type.getSuperclass()) {
                 for (Method method : type.getDeclaredMethods()) {
                     String name = method.getName();
                     boolean lifecycleCallback = "onEntryAnimatingAwayEnded".equals(name)
                             || "onShadeOrQsExpanded".equals(name)
                             || "onQsFullscreen".equals(name);
-                    boolean managerActivity = managerActivityMethods.contains(name);
-                    if ((!lifecycleCallback && !managerActivity)
+                    if (!lifecycleCallback
                             || (lifecycleCallback && method.getParameterCount() != 1)
                             || !hooked.add(method.toGenericString())) continue;
                     method.setAccessible(true);
                     hook(method).intercept(chain -> {
-                        Object managerInstance = chain.getThisObject();
-                        if (managerInstance != null) sHeadsUpManagerInstance = managerInstance;
                         Object result = chain.proceed();
                         if ("onEntryAnimatingAwayEnded".equals(name)) {
                             launchPendingForEntry(chain.getArg(0));
@@ -1323,28 +1316,25 @@ public class MoreBubbleHookModule extends XposedModule {
                     ? new PendingHeadsUpLaunch(handle.getContext(), row, sbn, entry,
                     "Heads-up swipe") : null;
             if (pending != null) sPendingHeadsUpLaunches.put(key, pending);
-            boolean removalRequested = requestHeadsUpPopupRemoval(row);
             if (pending != null) {
-                // If SystemUI does not expose its Heads-up manager, wait for its normal
-                // popup removal instead of launching Freeform over the popup. The native
-                // notification button also collapses the shade after opening; request the
-                // same collapse here so the popup does not have to wait for its full timeout.
-                boolean shadeCollapseRequested = false;
-                if (!removalRequested && sBubblesManager != null) {
-                    collapseShadeFromManager(sBubblesManager);
-                    shadeCollapseRequested = true;
+                // Match the native button's shade-collapse path. If SystemUI cannot
+                // perform that collapse, launch immediately instead of waiting for timeout.
+                boolean collapseRequested = sBubblesManager != null
+                        && collapseShadeFromManager(sBubblesManager);
+                if (collapseRequested) {
+                    if (isDebugLoggingEnabled(handle.getContext())) {
+                        logDetailedInfo(handle.getContext(), "Heads-up swipe: requested button "
+                                + "shade-collapse path; waiting briefly for popup dismissal");
+                    }
+                    waitForHeadsUpRemoval(pending, 0);
+                } else {
+                    if (isDebugLoggingEnabled(handle.getContext())) {
+                        logDetailedInfo(handle.getContext(), "Heads-up swipe: button shade-collapse "
+                                + "path unavailable; launching Freeform immediately");
+                    }
+                    launchPendingHeadsUp(pending);
                 }
-                if (!removalRequested && isDebugLoggingEnabled(handle.getContext())) {
-                    logDetailedInfo(handle.getContext(), "Heads-up swipe: popup removal "
-                            + "request unavailable; shadeCollapseRequested="
-                            + shadeCollapseRequested + "; waiting for popup dismissal");
-                }
-                waitForHeadsUpRemoval(pending, 0);
                 return true;
-            }
-            if (removalRequested) {
-                Log.w(TAG, "Heads-up swipe: popup removal requested but notification key unavailable");
-                return false;
             }
             if (isHeadsUpRow(row)) {
                 Log.w(TAG, "Heads-up swipe: notification key unavailable while popup is active; launch canceled");
@@ -1358,25 +1348,6 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    private static boolean requestHeadsUpPopupRemoval(Object row) {
-        if (row == null) return false;
-        try {
-            Object sbn = getNotificationSbnFromRow(row);
-            Object keyValue = sbn != null ? invokeSystemUi(sbn, "getKey") : null;
-            if (!(keyValue instanceof String)) return false;
-            String key = (String) keyValue;
-            Object manager = getHeadsUpManager(row);
-            if (manager != null && removeHeadsUpEntry(manager, key)) {
-                Log.i(TAG, "Requested normal Heads-up removal before opening " + key);
-                return true;
-            }
-            Log.w(TAG, "Heads-up manager unavailable; leaving popup lifecycle to SystemUI");
-        } catch (Throwable t) {
-            Log.w(TAG, "Request Heads-up removal failed: " + t.getMessage());
-        }
-        return false;
-    }
-
     private static void waitForHeadsUpRemoval(PendingHeadsUpLaunch pending, int attempt) {
         if (pending == null || pending.started
                 || sPendingHeadsUpLaunches.get(pending.key) != pending) return;
@@ -1385,9 +1356,10 @@ public class MoreBubbleHookModule extends XposedModule {
             launchPendingHeadsUp(pending);
             return;
         }
-        if (attempt >= 625) {
-            sPendingHeadsUpLaunches.remove(pending.key, pending);
-            Log.w(TAG, "Heads-up swipe: popup did not dismiss within 10 seconds; launch canceled");
+        if (attempt >= 63) {
+            Log.w(TAG, "Heads-up swipe: popup remained after button shade-collapse; "
+                    + "launching immediately as fallback");
+            launchPendingHeadsUp(pending);
             return;
         }
         new android.os.Handler(Looper.getMainLooper()).postDelayed(
@@ -1454,94 +1426,6 @@ public class MoreBubbleHookModule extends XposedModule {
             Log.w(TAG, reason + ": BubblesManager is not ready");
         }
         return launched;
-    }
-
-    private static Object getHeadsUpManager(Object row) {
-        Object directManager = getFieldSystemUi(row, "mHeadsUpManager");
-        if (directManager != null) return directManager;
-        try {
-            ClassLoader cl = row.getClass().getClassLoader();
-            String[] names = {
-                    "com.android.systemui.statusbar.notification.headsup.HeadsUpManager",
-                    "com.android.systemui.statusbar.policy.HeadsUpManager"
-            };
-            Class<?> dependency = cl.loadClass("com.android.systemui.Dependency");
-            Method get = findMethodSystemUi(dependency, "get", Class.class);
-            if (get != null) {
-                for (String name : names) {
-                    try {
-                        Object manager = get.invoke(null, cl.loadClass(name));
-                        if (manager != null) return manager;
-                    } catch (Throwable ignored) {}
-                }
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "HeadsUpManager lookup failed: " + t.getMessage());
-        }
-        return sHeadsUpManagerInstance;
-    }
-
-    private static boolean removeHeadsUpEntry(Object manager, String key) {
-        Method selected = null;
-        for (Class<?> type = manager.getClass(); type != null; type = type.getSuperclass()) {
-            for (Method method : type.getDeclaredMethods()) {
-                Class<?>[] types = method.getParameterTypes();
-                if (!"removeNotification".equals(method.getName())
-                        || types.length < 2 || types[0] != String.class) {
-                    continue;
-                }
-                boolean supported = true;
-                for (int i = 1; i < types.length; i++) {
-                    if (types[i] != boolean.class && types[i] != Boolean.class
-                            && types[i] != String.class) {
-                        supported = false;
-                        break;
-                    }
-                }
-                if (!supported) continue;
-                method.setAccessible(true);
-                if (types.length == 4 && types[1] == boolean.class
-                        && types[2] == boolean.class && types[3] == String.class) {
-                    selected = method;
-                    break;
-                }
-                if (selected == null && types.length == 3
-                        && types[1] == boolean.class && types[2] == String.class) {
-                    selected = method;
-                } else if (selected == null && types.length == 2
-                        && types[1] == boolean.class) {
-                    selected = method;
-                }
-            }
-            if (selected != null && selected.getParameterCount() == 4) break;
-        }
-        if (selected == null) return false;
-        try {
-            Class<?>[] types = selected.getParameterTypes();
-            Object[] args = new Object[types.length];
-            args[0] = key;
-            for (int i = 1; i < types.length; i++) {
-                if (types[i] == boolean.class || types[i] == Boolean.class) {
-                    // Skip the minimum HUN dwell time, but keep SystemUI's normal
-                    // going-away animation. Evolution17's four-arg overload is preferred.
-                    args[i] = true;
-                } else if (types[i] == String.class) {
-                    args[i] = "MoreBubbleButton swipe";
-                } else {
-                    return false;
-                }
-            }
-            Object result = selected.invoke(manager, args);
-            Log.i(TAG, "HeadsUpManager.removeNotification invoked key=" + key
-                    + " result=" + result + " args=" + types.length);
-            // false means the manager queued a normal removal after the dwell time;
-            // invocation itself is still successful and the completion callback/poll
-            // controls when the target is launched.
-            return true;
-        } catch (Throwable t) {
-            Log.w(TAG, "HeadsUpManager.removeNotification failed: " + t.getMessage());
-            return false;
-        }
     }
 
     private static boolean openNotificationForRow(Context ctx, Object row, String reason) {
@@ -3479,21 +3363,22 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    private static void collapseShadeFromManager(Object bubblesManager) {
+    private static boolean collapseShadeFromManager(Object bubblesManager) {
         try {
             Object shadeController = getFieldSystemUi(bubblesManager, "mShadeController");
-            if (shadeController == null) return;
+            if (shadeController == null) return false;
             Method postForce = findMethodSystemUi(shadeController.getClass(), "postAnimateForceCollapseShade");
-            if (postForce != null) { postForce.invoke(shadeController); return; }
+            if (postForce != null) { postForce.invoke(shadeController); return true; }
             Method instant = findMethodSystemUi(shadeController.getClass(), "instantCollapseShade");
-            if (instant != null) { instant.invoke(shadeController); return; }
+            if (instant != null) { instant.invoke(shadeController); return true; }
             Method full = findMethodSystemUi(shadeController.getClass(), "animateCollapseShade", int.class, boolean.class, boolean.class);
-            if (full != null) { full.invoke(shadeController, 2, true, true); return; }
+            if (full != null) { full.invoke(shadeController, 2, true, true); return true; }
             Method normal = findMethodSystemUi(shadeController.getClass(), "animateCollapseShade", int.class);
-            if (normal != null) normal.invoke(shadeController, 0);
+            if (normal != null) { normal.invoke(shadeController, 0); return true; }
         } catch (Throwable t) {
             Log.w(TAG, "collapseShade: " + t.getMessage());
         }
+        return false;
     }
 
     private static Method findMethodByNameAndCount(Class<?> c, String n, int count) {
