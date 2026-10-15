@@ -2575,12 +2575,22 @@ public class MoreBubbleHookModule extends XposedModule {
 
             Method setIntent = findMethodSystemUi(overflowBubble.getClass(),
                     "setAppBubbleIntent", Intent.class);
+            String intentSetter = "setAppBubbleIntent";
             if (setIntent == null) {
-                logDetailedInfo(context, reason + ": overflow Bubble Intent setter unavailable");
+                // Lunaris 16.2 stores TYPE_APP's launch Intent in Bubble.mIntent and exposes
+                // this package-private setter. Its overflow promotion path reuses the retained
+                // Bubble, so update the launch Intent before asking Shell to reinflate it.
+                setIntent = findMethodSystemUi(overflowBubble.getClass(), "setIntent", Intent.class);
+                intentSetter = "setIntent";
+            }
+            if (setIntent == null) {
+                logDetailedInfo(context, reason
+                        + ": overflow Bubble Intent setter unavailable (setAppBubbleIntent/setIntent)");
                 return false;
             }
             setIntent.invoke(overflowBubble, new Intent(submittedIntent));
-            logDetailedInfo(context, reason + ": updated retained overflow Bubble Intent"
+            logDetailedInfo(context, reason + ": updated retained overflow Bubble Intent via "
+                    + intentSetter
                     + " before promotion package=" + packageName);
 
             Method promote = findMethodSystemUi(controller.getClass(),
