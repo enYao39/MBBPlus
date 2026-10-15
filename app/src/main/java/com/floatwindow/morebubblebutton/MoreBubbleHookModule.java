@@ -2586,6 +2586,10 @@ public class MoreBubbleHookModule extends XposedModule {
             if (setIntent == null) {
                 logDetailedInfo(context, reason
                         + ": overflow Bubble Intent setter unavailable (setAppBubbleIntent/setIntent)");
+                if (context != null && isDebugLoggingEnabled(context)) {
+                    logDetailedInfo(context, reason + ": overflow Bubble class="
+                            + describeBubbleIntentApi(overflowBubble));
+                }
                 return false;
             }
             setIntent.invoke(overflowBubble, new Intent(submittedIntent));
@@ -2630,6 +2634,40 @@ public class MoreBubbleHookModule extends XposedModule {
             Log.w(TAG, reason + ": overflow app Bubble update failed: " + t.getMessage());
             return false;
         }
+    }
+
+    /** Describe only member names and types; never include Bubble/Intent values. */
+    private static String describeBubbleIntentApi(Object bubble) {
+        if (bubble == null) return "null";
+        StringBuilder result = new StringBuilder(bubble.getClass().getName());
+        int reported = 0;
+        for (Class<?> type = bubble.getClass(); type != null && reported < 24;
+                type = type.getSuperclass()) {
+            try {
+                for (Method method : type.getDeclaredMethods()) {
+                    String name = method.getName().toLowerCase(Locale.ROOT);
+                    if (!name.contains("intent") && !name.contains("appbubble")) continue;
+                    if (reported++ >= 24) break;
+                    result.append("; method=").append(type.getSimpleName()).append('#')
+                            .append(method.getName()).append('(');
+                    Class<?>[] parameters = method.getParameterTypes();
+                    for (int i = 0; i < parameters.length; i++) {
+                        if (i > 0) result.append(',');
+                        result.append(parameters[i].getSimpleName());
+                    }
+                    result.append(")->").append(method.getReturnType().getSimpleName());
+                }
+                for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                    String name = field.getName().toLowerCase(Locale.ROOT);
+                    if (!name.contains("intent") && !name.contains("appbubble")) continue;
+                    if (reported++ >= 24) break;
+                    result.append("; field=").append(type.getSimpleName()).append('#')
+                            .append(field.getName()).append(':')
+                            .append(field.getType().getSimpleName());
+                }
+            } catch (Throwable ignored) {}
+        }
+        return result.toString();
     }
 
     /**
