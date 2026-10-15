@@ -827,7 +827,10 @@ public class MoreBubbleHookModule extends XposedModule {
                         if ("onDetachedFromWindow".equals(name)) {
                             cancelHeadsUpRowSync(row);
                             untrackHeadsUpRow(row);
-                            cancelPendingForRow(row);
+                            // A swipe-triggered auto-cancel can detach the notification row
+                            // before the polling callback observes the Heads-up state change.
+                            // Consume the pending launch here instead of dropping it.
+                            launchPendingForRow(row);
                             removeSwipeHandle(row);
                             return result;
                         }
@@ -1370,10 +1373,16 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static void launchPendingForRow(Object row) {
-        String key = getNotificationKey(getNotificationSbnFromRow(row));
-        if (key == null) return;
-        PendingHeadsUpLaunch pending = sPendingHeadsUpLaunches.get(key);
-        if (pending != null && pending.row == row) launchPendingHeadsUp(pending);
+        for (PendingHeadsUpLaunch pending : sPendingHeadsUpLaunches.values()) {
+            if (pending.row == row) {
+                if (isDebugLoggingEnabled(pending.context)) {
+                    logDetailedInfo(pending.context, "Heads-up swipe: popup row detached; "
+                            + "launching pending Freeform route");
+                }
+                launchPendingHeadsUp(pending);
+                return;
+            }
+        }
     }
 
     private static void launchPendingForEntry(Object entry) {
@@ -1382,15 +1391,6 @@ public class MoreBubbleHookModule extends XposedModule {
         if (key == null) return;
         PendingHeadsUpLaunch pending = sPendingHeadsUpLaunches.get(key);
         if (pending != null && pending.entry == entry) launchPendingHeadsUp(pending);
-    }
-
-    private static void cancelPendingForRow(Object row) {
-        String key = getNotificationKey(getNotificationSbnFromRow(row));
-        if (key == null) return;
-        PendingHeadsUpLaunch pending = sPendingHeadsUpLaunches.get(key);
-        if (pending != null && pending.row == row) {
-            sPendingHeadsUpLaunches.remove(key, pending);
-        }
     }
 
     private static void launchPendingHeadsUp(String key) {
