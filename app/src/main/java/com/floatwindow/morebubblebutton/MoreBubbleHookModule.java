@@ -272,6 +272,7 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final Map<View, Object> sSwipeHandleRows = new WeakHashMap<>();
     private static volatile boolean sShadeOrQsExpanded;
     private static volatile boolean sQsFullscreen;
+    private static volatile Object sHeadsUpManagerInstance;
     // Tracks whether any row has reported being on the keyguard. This is a
     // coarse flag — it's set when setOnKeyguard(true) is called on ANY row,
     // and cleared when setOnKeyguard(false) is called. Used to prevent
@@ -774,6 +775,8 @@ public class MoreBubbleHookModule extends XposedModule {
                             || !hooked.add(method.toGenericString())) continue;
                     method.setAccessible(true);
                     hook(method).intercept(chain -> {
+                        Object managerInstance = chain.getThisObject();
+                        if (managerInstance != null) sHeadsUpManagerInstance = managerInstance;
                         Object result = chain.proceed();
                         if ("onEntryAnimatingAwayEnded".equals(name)) {
                             launchPendingForEntry(chain.getArg(0));
@@ -1452,16 +1455,18 @@ public class MoreBubbleHookModule extends XposedModule {
             };
             Class<?> dependency = cl.loadClass("com.android.systemui.Dependency");
             Method get = findMethodSystemUi(dependency, "get", Class.class);
-            if (get == null) return null;
-            for (String name : names) {
-                try {
-                    return get.invoke(null, cl.loadClass(name));
-                } catch (Throwable ignored) {}
+            if (get != null) {
+                for (String name : names) {
+                    try {
+                        Object manager = get.invoke(null, cl.loadClass(name));
+                        if (manager != null) return manager;
+                    } catch (Throwable ignored) {}
+                }
             }
         } catch (Throwable t) {
             Log.w(TAG, "HeadsUpManager lookup failed: " + t.getMessage());
         }
-        return null;
+        return sHeadsUpManagerInstance;
     }
 
     private static boolean removeHeadsUpEntry(Object manager, String key) {
