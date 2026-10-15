@@ -2,9 +2,9 @@
 
 MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部修改均由 AICoding 完成，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心添加 Bubble/Freeform 能力。
 
-> Evolution 12.3 是当前主要实机验证基线；Lunaris AOSP 3.12 已针对通知注入路径做过兼容性验证。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
+> Evolution 17 是当前主要实机验证基线；Lunaris AOSP 3.12 已针对通知注入路径做过兼容性验证。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
 
-当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档记录的当前版本为 `1.7.15 (23)`。
+当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档对应版本为 `1.7.49 (57)`。
 
 ## 功能
 
@@ -24,6 +24,8 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 - Heads-up popup 的 Bubble 按钮和下滑横条由两个独立开关控制，可同时启用
   - 横条只显示在 Heads-up popup，不显示在普通通知列表或锁屏界面
   - 下滑横条会打开当前通知对应的 Bubble/Freeform 目标
+  - 对自动取消通知请求移除通知；对其他通知只请求收起 Heads-up popup，通知仍留在列表
+  - 收起后才启动打开流程；如果 10 秒内没有观察到 popup 退出，取消本次待启动操作
   - 横条长度、粗细和距通知底部的间距可调；间距范围为 `-10dp..24dp`
 - 锁屏界面不显示额外的 Bubble/Freeform 按钮或横条
 - 自动过滤无启动入口或特殊用户通知，避免 `android` / `user=-1` 等无效场景导致 SystemUI 崩溃
@@ -108,6 +110,10 @@ MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部�
 | `BubblesManager.onUserChangedBubble` / `expandStackAndSelectBubble` | 拦截通知气泡点击，改走稳定的 app bubble 路径 |
 | `BubbleController.expandStackAndSelectBubble(Intent, UserHandle, EntryPoint, null)` | 使用通知 `contentIntent` 创建并展开 app bubble |
 | `BubbleCoordinator.removeNotification` | 在气泡成功展开后移除 auto-cancel 通知 |
+
+通知 Freeform 会在发送通知 PendingIntent 前记录当前 task 状态；之后按通知所属用户、应用和 task 变化关联新启动的 task，再请求 LMO 将其移入自由窗口。若启动后的 task 无法关联或移动请求失败，代码不会再次发送同一通知 PendingIntent，而会尝试按 Activity 组件恢复。这个异步恢复可能无法保留通知专属的会话上下文，不能据此保证深链已成功；需要结合设备实际行为验证。Bubble 复用时按包含 Android 用户身份的 Bubble key 查找，避免个人资料和工作资料之间串用。
+
+Heads-up swipe 的待启动操作由 Heads-up 状态轮询和 SystemUI 的离场动画生命周期钩子触发；单纯的通知行 detach 不会启动操作。`setHeadsUpAnimatingAway(false)` 和 `onEntryAnimatingAwayEnded` 是动画生命周期信号，不等于每次都独立确认了 Heads-up 状态已经退出。
 
 ## 构建
 

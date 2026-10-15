@@ -20,9 +20,12 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 
 - 先检查传统 Freeform feature、全局设置、Evolution DesktopMode 和 `lmo_freeform` Binder 服务。
 - LMO Binder 的 PendingIntent 路径要求 system UID，普通 SystemUI UID 不能直接调用；不要仅因 Binder 服务存在就从 SystemUI 手动 transact。
-- SystemUI 应先发送原始通知 PendingIntent，再查询新任务并通过 LMO Receiver 传递真实 `taskId` 将任务移动到 Freeform；只有任务查询不可用时才使用组件 Receiver/ActivityOptions 回退。
+- SystemUI 在发送原始通知 PendingIntent 前应记录 task 快照；之后按通知 user ID、包名和 task 变化关联本次 task，再通过 LMO Receiver 传递真实 `taskId`。不能仅凭包名选择旧 task。
+- 若 user ID 不可读，不要默认成用户 0；在发送 PendingIntent 前退出该 task move 路径，保留尚未消费 PendingIntent 的 Bubble/全屏回退机会。
+- PendingIntent 已发送后若 task 关联或移动失败，不要再次发送它。组件 Receiver 的 `taskId=-1` 恢复可能丢失通知上下文；明确记录这个限制，不要声称等价保留了通知 deep-link。
+- App Bubble 查找必须验证包含 user ID 的精确 Bubble key，禁止仅按包名跨个人/工作资料复用。
 - 如果代码运行在真正的 system UID 进程，LMO PendingIntent 路径的参数顺序必须与 AIDL 一致：包名、占位 Activity、`userId=-100`、`taskId=-1`、PendingIntent、宽、高、densityDpi。
-- 所有路径都必须最终支持 Bubble 和全屏回退。
+- 对尚未发送通知 PendingIntent 的同步失败路径，保留 Bubble 和全屏回退。PendingIntent 已发送后的异步恢复是不同路径，不可通过重发造成重复启动；请根据代码和实机证据说明其限制。
 - 不要把“调用返回成功”当成“窗口可用”；要继续检查窗口是否创建、目标任务是否被移除，以及是否出现后台启动拦截。
 - `shouldShowBubbleButton` 必须兼容 Evolution 的无参变体和 Lunaris AOSP 3.12 的 `NotificationEntry` 参数变体。
 
@@ -32,6 +35,8 @@ description: 维护 MoreBubbleButton Android/Xposed 模块，尤其是 SystemUI 
 - 横条只存在于 Heads-up popup，不要添加到普通通知或锁屏布局。
 - 通知 Bubble/Freeform 按钮与 Heads-up swipe handle 使用独立开关，可同时启用；关闭按钮时横条仍应按自身开关工作。
 - Swipe handle 只额外叠加在 Heads-up popup，不得隐藏或改变 Bubble/Freeform 按钮行为；下滑横条应与按钮使用同一打开和回退逻辑。
+- 对 auto-cancel 通知请求移除通知；对其他通知只请求收起 Heads-up popup，通知本身仍应留在列表。启动应等待 popup 退出信号，超过当前 10 秒等待上限仍无退出时取消待启动操作。
+- `isHeadsUpState()` 轮询可直接观察 popup 状态；`setHeadsUpAnimatingAway(false)` 和 `onEntryAnimatingAwayEnded` 是动画生命周期回调，不能将它们描述为独立的状态确认。通知行 detach 本身不能触发待启动操作。
 - 新设置键 `swipe_handle_enabled` 必须兼容旧 `popup_presentation=1` 的偏好迁移；设置 Provider 也要提供迁移后的有效值给 SystemUI。
 - 横条底部间距范围为 `-10dp..24dp`；修改设置范围时必须同步更新 `ModuleSettings`、Compose 设置页、`SettingsProvider` 和中英文资源。
 - 中英文资源必须同步；英文采用 “Bubble” 和 “Freeform” 等短文案。
