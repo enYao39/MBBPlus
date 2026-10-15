@@ -1315,15 +1315,26 @@ public class MoreBubbleHookModule extends XposedModule {
                     ? new PendingHeadsUpLaunch(handle.getContext(), row, sbn, entry,
                     "Heads-up swipe") : null;
             if (pending != null) sPendingHeadsUpLaunches.put(key, pending);
-            if (requestHeadsUpPopupRemoval(row)) {
-                // Launch only after the row/manager reports that the normal removal
-                // animation has finished while the original row is still valid.
-                if (pending != null) {
-                    waitForHeadsUpRemoval(pending, 0);
+            boolean removalRequested = requestHeadsUpPopupRemoval(row);
+            if (pending != null) {
+                // If SystemUI does not expose its Heads-up manager, wait for its normal
+                // popup timeout/removal instead of launching Freeform over the popup.
+                // When removal was requested successfully, this waits for that removal.
+                if (!removalRequested && isDebugLoggingEnabled(handle.getContext())) {
+                    logDetailedInfo(handle.getContext(), "Heads-up swipe: popup removal "
+                            + "request unavailable; waiting for popup dismissal");
                 }
+                waitForHeadsUpRemoval(pending, 0);
                 return true;
             }
-            if (pending != null) sPendingHeadsUpLaunches.remove(key, pending);
+            if (removalRequested) {
+                Log.w(TAG, "Heads-up swipe: popup removal requested but notification key unavailable");
+                return false;
+            }
+            if (isHeadsUpRow(row)) {
+                Log.w(TAG, "Heads-up swipe: notification key unavailable while popup is active; launch canceled");
+                return false;
+            }
             return openNotificationForSnapshot(handle.getContext(), sbn, entry,
                     "Heads-up swipe");
         } catch (Throwable t) {
@@ -1357,6 +1368,11 @@ public class MoreBubbleHookModule extends XposedModule {
         boolean stillHeadsUp = isHeadsUpRow(pending.row);
         if (!stillHeadsUp) {
             launchPendingHeadsUp(pending);
+            return;
+        }
+        if (attempt >= 625) {
+            sPendingHeadsUpLaunches.remove(pending.key, pending);
+            Log.w(TAG, "Heads-up swipe: popup did not dismiss within 10 seconds; launch canceled");
             return;
         }
         new android.os.Handler(Looper.getMainLooper()).postDelayed(
@@ -1585,20 +1601,20 @@ public class MoreBubbleHookModule extends XposedModule {
         if (android.os.Process.myUid() == android.os.Process.SYSTEM_UID
                 && launchNotificationViaLmoBinder(ctx, sbn, notification, reason)) return true;
 
-        // Evolution's own SystemUI uses the hidden ActivityOptions.setLaunchTaskId() API
-        // to deliver a later PendingIntent into an already-created task. Start the
-        // resolved component in LMO Freeform first, then inject the exact notification
-        // PendingIntent into that task to avoid the temporary fullscreen transition.
-        if (launchNotificationViaLmoComponentThenIntent(ctx, sbn, notification, reason)) {
-            return true;
-        }
-
         // SystemUI cannot call the LMO Binder service directly. Stage the exact
         // notification PendingIntent behind the current task, then ask the
         // exported system-UID receiver to move that task into an LMO Freeform
         // display. This preserves the notification extras without exposing a
-        // fullscreen task-switch animation to the user.
+        // fullscreen task-switch animation to the user. Prefer this path because the
+        // app creates its task from the notification PendingIntent itself.
         if (launchNotificationByTaskMove(ctx, sbn, notification, reason)) return true;
+
+        // Compatibility fallback: pre-create the resolved component in Freeform and
+        // deliver the notification PendingIntent into that task afterward. Some apps
+        // do not process this second Intent as an in-app deep link.
+        if (launchNotificationViaLmoComponentThenIntent(ctx, sbn, notification, reason)) {
+            return true;
+        }
 
         return launchNotificationViaLmoComponent(ctx, sbn, notification, reason);
     }
@@ -1685,7 +1701,8 @@ public class MoreBubbleHookModule extends XposedModule {
             Log.i(TAG, reason + ": launched component in LMO Freeform, then delivered "
                     + "notification Intent into taskId=" + taskId + " for "
                     + component.flattenToShortString());
-            scheduleFreeformTaskSnapshots(ctx, reason, component, taskId);
+            scheduleFreeformTaskSnapshots(ctx, reason, component, taskId,
+                    "after_notification_intent");
         } catch (PendingIntent.CanceledException e) {
             Log.w(TAG, reason + ": notification PendingIntent canceled in LMO two-stage launch");
         } catch (Throwable t) {
@@ -1695,7 +1712,7 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static void scheduleFreeformTaskSnapshots(Context ctx, String reason,
-            ComponentName target, int taskId) {
+            ComponentName target, int taskId, String phasePrefix) {
         if (!isDebugLoggingEnabled(ctx)) return;
         Thread sampler = new Thread(() -> {
             long[] delaysMs = {300L, 900L, 1600L};
@@ -1706,7 +1723,7 @@ public class MoreBubbleHookModule extends XposedModule {
                 if (delayMs == 900L) elapsedMs = 1200L;
                 else if (delayMs == 1600L) elapsedMs = 2800L;
                 logFreeformTaskSnapshot(ctx, reason, target, taskId,
-                        "after_notification_intent_" + elapsedMs + "ms");
+                        phasePrefix + "_" + elapsedMs + "ms");
             }
         }, "MoreBubble-Freeform-task-sampler");
         sampler.setDaemon(true);
@@ -1851,9 +1868,15 @@ public class MoreBubbleHookModule extends XposedModule {
                     Log.w(TAG, reason + ": notification task was not found for LMO Freeform");
                     return;
                 }
-                requestLmoFreeformForTask(appContext, packageName,
+                logFreeformTaskSnapshot(appContext, reason, finalTarget,
+                        taskId, "before_lmo_task_move");
+                boolean requested = requestLmoFreeformForTask(appContext, packageName,
                         finalTarget != null ? finalTarget.getClassName() : "unknown",
                         userId, taskId, reason);
+                if (requested) {
+                    scheduleFreeformTaskSnapshots(appContext, reason, finalTarget, taskId,
+                            "after_lmo_task_move");
+                }
             }, "MoreBubble-LMO-task-move");
             mover.start();
             Log.i(TAG, reason + ": staged notification PendingIntent behind current task; "
