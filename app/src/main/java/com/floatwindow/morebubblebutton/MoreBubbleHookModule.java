@@ -1317,20 +1317,23 @@ public class MoreBubbleHookModule extends XposedModule {
                     "Heads-up swipe") : null;
             if (pending != null) sPendingHeadsUpLaunches.put(key, pending);
             if (pending != null) {
-                // Match the native button's shade-collapse path. If SystemUI cannot
-                // perform that collapse, launch immediately instead of waiting for timeout.
+                // Match the notification button's dismissal sequence before starting Freeform.
+                boolean notificationRemovalRequested = sBubblesManager != null
+                        && dismissClickedNotificationIfAutoCancel(sBubblesManager, entry);
                 boolean collapseRequested = sBubblesManager != null
                         && collapseShadeFromManager(sBubblesManager);
                 if (collapseRequested) {
                     if (isDebugLoggingEnabled(handle.getContext())) {
-                        logDetailedInfo(handle.getContext(), "Heads-up swipe: requested button "
-                                + "shade-collapse path; waiting briefly for popup dismissal");
+                        logDetailedInfo(handle.getContext(), "Heads-up swipe: button dismissal "
+                                + "path notificationRemovalRequested=" + notificationRemovalRequested
+                                + " shadeCollapseRequested=true; waiting briefly for popup dismissal");
                     }
                     waitForHeadsUpRemoval(pending, 0);
                 } else {
                     if (isDebugLoggingEnabled(handle.getContext())) {
-                        logDetailedInfo(handle.getContext(), "Heads-up swipe: button shade-collapse "
-                                + "path unavailable; launching Freeform immediately");
+                        logDetailedInfo(handle.getContext(), "Heads-up swipe: button dismissal "
+                                + "path notificationRemovalRequested=" + notificationRemovalRequested
+                                + " shadeCollapseRequested=false; launching Freeform immediately");
                     }
                     launchPendingHeadsUp(pending);
                 }
@@ -3308,11 +3311,11 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    private static void dismissClickedNotificationIfAutoCancel(Object bubblesManager, Object entry) {
+    private static boolean dismissClickedNotificationIfAutoCancel(Object bubblesManager, Object entry) {
         try {
             Object sbn = getFieldSystemUi(entry, "mSbn");
             Notification notif = sbn != null ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
-            if (notif == null || (notif.flags & Notification.FLAG_AUTO_CANCEL) == 0) return;
+            if (notif == null || (notif.flags & Notification.FLAG_AUTO_CANCEL) == 0) return false;
             Object visibilityProvider = getFieldSystemUi(bubblesManager, "mVisibilityProvider");
             Object visibility = null;
             if (visibilityProvider != null) {
@@ -3334,18 +3337,24 @@ public class MoreBubbleHookModule extends XposedModule {
                     break;
                 }
             }
-            if (stats == null) return;
+            if (stats == null) return false;
             Object callbacks = getFieldSystemUi(bubblesManager, "mCallbacks");
+            boolean removalRequested = false;
             if (callbacks instanceof java.util.List) {
                 for (Object cb : (java.util.List<?>) callbacks) {
                     Method remove = findMethodByNameAndCount(cb.getClass(), "removeNotification", 2);
-                    if (remove != null) remove.invoke(cb, entry, stats);
+                    if (remove != null) {
+                        remove.invoke(cb, entry, stats);
+                        removalRequested = true;
+                    }
                 }
-                Log.i(TAG, "dismissed clicked auto-cancel notification");
+                if (removalRequested) Log.i(TAG, "requested removal of clicked auto-cancel notification");
             }
+            return removalRequested;
         } catch (Throwable t) {
             Throwable cause = t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null ? t.getCause() : t;
             Log.w(TAG, "dismiss clicked notification: " + cause.getClass().getSimpleName() + ": " + cause.getMessage());
+            return false;
         }
     }
 
