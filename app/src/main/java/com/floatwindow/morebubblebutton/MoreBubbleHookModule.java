@@ -34,6 +34,7 @@ import android.widget.Space;
 import android.widget.Toast;
 
 import java.lang.reflect.Method;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -827,10 +828,6 @@ public class MoreBubbleHookModule extends XposedModule {
                         if ("onDetachedFromWindow".equals(name)) {
                             cancelHeadsUpRowSync(row);
                             untrackHeadsUpRow(row);
-                            // A swipe-triggered auto-cancel can detach the notification row
-                            // before the polling callback observes the Heads-up state change.
-                            // Consume the pending launch here instead of dropping it.
-                            launchPendingForRow(row);
                             removeSwipeHandle(row);
                             return result;
                         }
@@ -1320,23 +1317,30 @@ public class MoreBubbleHookModule extends XposedModule {
                     "Heads-up swipe") : null;
             if (pending != null) sPendingHeadsUpLaunches.put(key, pending);
             if (pending != null) {
-                // Match the notification button's dismissal sequence before starting Freeform.
+                // Match the notification button's auto-cancel removal and shade collapse.
+                // A non-auto-cancel notification stays in the shade, so remove only its
+                // Heads-up presentation while preserving the notification itself.
                 boolean notificationRemovalRequested = sBubblesManager != null
                         && dismissClickedNotificationIfAutoCancel(sBubblesManager, entry);
-                boolean collapseRequested = sBubblesManager != null
+                boolean headsUpRemovalRequested = !notificationRemovalRequested
+                        && requestHeadsUpPopupRemoval(row);
+                boolean shadeCollapseRequested = sBubblesManager != null
                         && collapseShadeFromManager(sBubblesManager);
-                if (collapseRequested) {
+                if (notificationRemovalRequested || headsUpRemovalRequested) {
                     if (isDebugLoggingEnabled(handle.getContext())) {
                         logDetailedInfo(handle.getContext(), "Heads-up swipe: button dismissal "
                                 + "path notificationRemovalRequested=" + notificationRemovalRequested
-                                + " shadeCollapseRequested=true; waiting briefly for popup dismissal");
+                                + " headsUpRemovalRequested=" + headsUpRemovalRequested
+                                + " shadeCollapseRequested=" + shadeCollapseRequested
+                                + "; waiting for popup dismissal");
                     }
                     waitForHeadsUpRemoval(pending, 0);
                 } else {
                     if (isDebugLoggingEnabled(handle.getContext())) {
                         logDetailedInfo(handle.getContext(), "Heads-up swipe: button dismissal "
                                 + "path notificationRemovalRequested=" + notificationRemovalRequested
-                                + " shadeCollapseRequested=false; launching Freeform immediately");
+                                + " headsUpRemovalRequested=false shadeCollapseRequested="
+                                + shadeCollapseRequested + "; launching Freeform immediately");
                     }
                     launchPendingHeadsUp(pending);
                 }
@@ -1354,6 +1358,75 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
+    private static boolean requestHeadsUpPopupRemoval(Object row) {
+        if (row == null) return false;
+        String key = getNotificationKey(getNotificationSbnFromRow(row));
+        if (key == null) return false;
+
+        try {
+            Object manager = getFieldSystemUi(row, "mHeadsUpManager");
+            if (manager == null) {
+                ClassLoader cl = row.getClass().getClassLoader();
+                Class<?> dependency = cl.loadClass("com.android.systemui.Dependency");
+                Method get = findMethodSystemUi(dependency, "get", Class.class);
+                if (get != null) {
+                    String[] managerNames = {
+                            "com.android.systemui.statusbar.notification.headsup.HeadsUpManager",
+                            "com.android.systemui.statusbar.policy.HeadsUpManager"
+                    };
+                    for (String managerName : managerNames) {
+                        try {
+                            manager = get.invoke(null, cl.loadClass(managerName));
+                            if (manager != null) break;
+                        } catch (Throwable ignored) {}
+                    }
+                }
+            }
+            if (manager == null) return false;
+
+            Method selected = null;
+            for (Class<?> type = manager.getClass(); type != null; type = type.getSuperclass()) {
+                for (Method method : type.getDeclaredMethods()) {
+                    Class<?>[] params = method.getParameterTypes();
+                    if (!"removeNotification".equals(method.getName()) || params.length < 2
+                            || params[0] != String.class) continue;
+                    boolean supported = params.length == 2 && params[1] == boolean.class
+                            || params.length == 3 && params[1] == boolean.class
+                            && params[2] == String.class
+                            || params.length == 4 && params[1] == boolean.class
+                            && params[2] == boolean.class && params[3] == String.class;
+                    if (!supported) continue;
+                    if (selected == null || params.length > selected.getParameterCount()) {
+                        method.setAccessible(true);
+                        selected = method;
+                    }
+                }
+                if (selected != null && selected.getParameterCount() == 4) break;
+            }
+            if (selected == null) return false;
+
+            Object[] args = new Object[selected.getParameterCount()];
+            args[0] = key;
+            args[1] = true; // releaseImmediately
+            if (args.length == 3) {
+                args[2] = "MoreBubbleButton swipe";
+            } else if (args.length == 4) {
+                args[2] = true; // animate the normal Heads-up removal
+                args[3] = "MoreBubbleButton swipe";
+            }
+            selected.invoke(manager, args);
+            Context context = row instanceof View ? ((View) row).getContext() : null;
+            if (context != null && isDebugLoggingEnabled(context)) {
+                logDetailedInfo(context, "Heads-up swipe: requested normal popup removal via "
+                        + selected.getName() + "/" + selected.getParameterCount());
+            }
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "Heads-up popup removal request failed: " + t.getMessage());
+            return false;
+        }
+    }
+
     private static void waitForHeadsUpRemoval(PendingHeadsUpLaunch pending, int attempt) {
         if (pending == null || pending.started
                 || sPendingHeadsUpLaunches.get(pending.key) != pending) return;
@@ -1362,27 +1435,14 @@ public class MoreBubbleHookModule extends XposedModule {
             launchPendingHeadsUp(pending);
             return;
         }
-        if (attempt >= 63) {
-            Log.w(TAG, "Heads-up swipe: popup remained after button shade-collapse; "
-                    + "launching immediately as fallback");
-            launchPendingHeadsUp(pending);
+        if (attempt >= 625) {
+            sPendingHeadsUpLaunches.remove(pending.key, pending);
+            Log.w(TAG, "Heads-up swipe: popup dismissal was not observed within 10 seconds; "
+                    + "canceling pending launch");
             return;
         }
         new android.os.Handler(Looper.getMainLooper()).postDelayed(
                 () -> waitForHeadsUpRemoval(pending, attempt + 1), 16L);
-    }
-
-    private static void launchPendingForRow(Object row) {
-        for (PendingHeadsUpLaunch pending : sPendingHeadsUpLaunches.values()) {
-            if (pending.row == row) {
-                if (isDebugLoggingEnabled(pending.context)) {
-                    logDetailedInfo(pending.context, "Heads-up swipe: popup row detached; "
-                            + "launching pending Freeform route");
-                }
-                launchPendingHeadsUp(pending);
-                return;
-            }
-        }
     }
 
     private static void launchPendingForEntry(Object entry) {
@@ -1391,6 +1451,19 @@ public class MoreBubbleHookModule extends XposedModule {
         if (key == null) return;
         PendingHeadsUpLaunch pending = sPendingHeadsUpLaunches.get(key);
         if (pending != null && pending.entry == entry) launchPendingHeadsUp(pending);
+    }
+
+    private static void launchPendingForRow(Object row) {
+        for (PendingHeadsUpLaunch pending : sPendingHeadsUpLaunches.values()) {
+            if (pending.row == row) {
+                if (isDebugLoggingEnabled(pending.context)) {
+                    logDetailedInfo(pending.context, "Heads-up swipe: popup exit animation ended; "
+                            + "launching pending Freeform route");
+                }
+                launchPendingHeadsUp(pending);
+                return;
+            }
+        }
     }
 
     private static void launchPendingHeadsUp(String key) {
@@ -1548,9 +1621,14 @@ public class MoreBubbleHookModule extends XposedModule {
             }
 
             int userId = getNotificationUserId(sbn);
+            if (userId < 0) {
+                Log.w(TAG, reason + ": notification user ID unavailable; skipping LMO two-stage route");
+                return false;
+            }
             List<?> tasksBefore = getRunningTasks(ctx);
             if (tasksBefore == null) return false;
-            final Set<Integer> taskIdsBefore = collectTaskIds(tasksBefore);
+            final Map<Integer, NotificationTaskSnapshot> taskStatesBefore =
+                    snapshotNotificationTasks(tasksBefore);
 
             Intent startFreeform = new Intent("com.libremobileos.freeform.START_FREEFORM")
                     .setComponent(new ComponentName(
@@ -1569,7 +1647,7 @@ public class MoreBubbleHookModule extends XposedModule {
             final long launchTime = SystemClock.uptimeMillis();
             Thread injector = new Thread(() -> deliverNotificationIntentToLmoTask(
                     notification.contentIntent, ctx, finalPackageName, finalComponent,
-                    taskIdsBefore, launchTime, setLaunchTaskId, reason),
+                    userId, taskStatesBefore, launchTime, setLaunchTaskId, reason),
                     "MoreBubble-LMO-intent-injector");
             injector.start();
             Log.i(TAG, reason + ": requested LMO Freeform component first; "
@@ -1583,13 +1661,17 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static void deliverNotificationIntentToLmoTask(PendingIntent pendingIntent,
-            Context ctx, String packageName, ComponentName component, Set<Integer> taskIdsBefore,
-            long launchTime, Method setLaunchTaskId, String reason) {
+            Context ctx, String packageName, ComponentName component, int userId,
+            Map<Integer, NotificationTaskSnapshot> taskStatesBefore, long launchTime,
+            Method setLaunchTaskId, String reason) {
+        boolean notificationIntentSendAttempted = false;
         try {
-            int taskId = waitForNewLmoTask(ctx, packageName, component, taskIdsBefore,
-                    launchTime);
+            int taskId = waitForNewLmoTask(ctx, packageName, component, userId,
+                    taskStatesBefore, launchTime);
             if (taskId < 0) {
                 Log.w(TAG, reason + ": LMO two-stage task was not created");
+                launchPendingIntentFullscreenFallback(pendingIntent, reason,
+                        "two-stage task association failed");
                 return;
             }
             logFreeformTaskSnapshot(ctx, reason, component,
@@ -1601,6 +1683,7 @@ public class MoreBubbleHookModule extends XposedModule {
                     "setAvoidMoveToFront");
             if (avoidMoveToFront != null) avoidMoveToFront.invoke(options);
 
+            notificationIntentSendAttempted = true;
             pendingIntent.send(options.toBundle());
             Log.i(TAG, reason + ": launched component in LMO Freeform, then delivered "
                     + "notification Intent into taskId=" + taskId + " for "
@@ -1612,6 +1695,26 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) {
             Log.w(TAG, reason + ": LMO two-stage Intent injection failed: "
                     + t.getMessage());
+            if (!notificationIntentSendAttempted) {
+                launchPendingIntentFullscreenFallback(pendingIntent, reason,
+                        "two-stage Intent preparation failed");
+            }
+        }
+    }
+
+    private static boolean launchPendingIntentFullscreenFallback(PendingIntent pendingIntent,
+            String reason, String failure) {
+        try {
+            ActivityOptions options = ActivityOptions.makeBasic();
+            setPendingIntentBackgroundStartAllowed(options);
+            pendingIntent.send(options.toBundle());
+            Log.i(TAG, reason + ": launched notification PendingIntent fullscreen after "
+                    + failure);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": fullscreen PendingIntent fallback failed after "
+                    + failure + ": " + t.getMessage());
+            return false;
         }
     }
 
@@ -1745,10 +1848,17 @@ public class MoreBubbleHookModule extends XposedModule {
             }
 
             int userId = getNotificationUserId(sbn);
+            if (userId < 0) {
+                Log.w(TAG, reason + ": notification user ID unavailable; skipping LMO task move");
+                return false;
+            }
             // Check the task-query capability before consuming the notification
             // PendingIntent. If this device hides running tasks from SystemUI,
             // the caller can still use the normal Bubble/fullscreen fallback.
-            if (getRunningTasks(ctx) == null) return false;
+            List<?> tasksBefore = getRunningTasks(ctx);
+            if (tasksBefore == null) return false;
+            Map<Integer, NotificationTaskSnapshot> taskStatesBefore =
+                    snapshotNotificationTasks(tasksBefore);
 
             // Android 17 defaults PendingIntent launches from SystemUI to
             // MODE_SYSTEM_DEFINED. The notification creator is a background
@@ -1761,15 +1871,17 @@ public class MoreBubbleHookModule extends XposedModule {
             // temporary normal task is never shown before LMO reparents it.
             ActivityOptions pendingIntentOptions = ActivityOptions.makeTaskLaunchBehind();
             setPendingIntentBackgroundStartAllowed(pendingIntentOptions);
-            notification.contentIntent.send(pendingIntentOptions.toBundle());
             long launchTime = SystemClock.uptimeMillis();
+            notification.contentIntent.send(pendingIntentOptions.toBundle());
             ComponentName finalTarget = target;
             Context appContext = ctx.getApplicationContext();
             Thread mover = new Thread(() -> {
                 int taskId = waitForNotificationTask(appContext, packageName, finalTarget,
-                        launchTime);
+                        userId, taskStatesBefore, launchTime);
                 if (taskId < 0) {
                     Log.w(TAG, reason + ": notification task was not found for LMO Freeform");
+                    recoverStagedNotificationInLmoFreeform(appContext, packageName,
+                            finalTarget, userId, reason, "task association failed");
                     return;
                 }
                 logFreeformTaskSnapshot(appContext, reason, finalTarget,
@@ -1780,6 +1892,9 @@ public class MoreBubbleHookModule extends XposedModule {
                 if (requested) {
                     scheduleFreeformTaskSnapshots(appContext, reason, finalTarget, taskId,
                             "after_lmo_task_move");
+                } else {
+                    recoverStagedNotificationInLmoFreeform(appContext, packageName,
+                            finalTarget, userId, reason, "task move request failed");
                 }
             }, "MoreBubble-LMO-task-move");
             mover.start();
@@ -1792,6 +1907,22 @@ public class MoreBubbleHookModule extends XposedModule {
             Log.w(TAG, reason + ": LMO task move preparation failed: " + t.getMessage());
         }
         return false;
+    }
+
+    private static void recoverStagedNotificationInLmoFreeform(Context ctx,
+            String packageName, ComponentName target, int userId, String reason,
+            String failure) {
+        Log.w(TAG, reason + ": staged notification route recovery after " + failure
+                + "; will not resend the notification PendingIntent");
+        if (target == null) {
+            Log.e(TAG, reason + ": staged notification recovery has no target component");
+            return;
+        }
+        boolean requested = requestLmoFreeformForTask(ctx, packageName,
+                target.getClassName(), userId, -1, reason + " component recovery");
+        if (!requested) {
+            Log.e(TAG, reason + ": LMO component recovery request failed after staged launch");
+        }
     }
 
     private static void setPendingIntentBackgroundStartAllowed(ActivityOptions options) {
@@ -1812,9 +1943,9 @@ public class MoreBubbleHookModule extends XposedModule {
     private static int getNotificationUserId(Object sbn) {
         try {
             int userId = (int) sbn.getClass().getMethod("getUserId").invoke(sbn);
-            return userId >= 0 ? userId : 0;
+            return userId >= 0 ? userId : -1;
         } catch (Throwable ignored) {
-            return 0;
+            return -1;
         }
     }
 
@@ -1851,12 +1982,14 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static int waitForNotificationTask(Context ctx, String packageName,
-            ComponentName target, long launchTime) {
-        long deadline = SystemClock.uptimeMillis() + 1800L;
+            ComponentName target, int userId,
+            Map<Integer, NotificationTaskSnapshot> taskStatesBefore, long launchTime) {
+        long deadline = SystemClock.uptimeMillis() + 4000L;
         while (SystemClock.uptimeMillis() < deadline) {
             List<?> tasks = getRunningTasks(ctx);
             if (tasks == null) return -1;
-            int taskId = findNotificationTask(tasks, packageName, target, launchTime);
+            int taskId = findNotificationTask(tasks, packageName, target, userId,
+                    taskStatesBefore, launchTime, false);
             if (taskId >= 0) return taskId;
             SystemClock.sleep(80L);
         }
@@ -1864,91 +1997,94 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static int waitForNewLmoTask(Context ctx, String packageName,
-            ComponentName target, Set<Integer> taskIdsBefore, long launchTime) {
+            ComponentName target, int userId,
+            Map<Integer, NotificationTaskSnapshot> taskStatesBefore, long launchTime) {
         long deadline = SystemClock.uptimeMillis() + 2200L;
         while (SystemClock.uptimeMillis() < deadline) {
             List<?> tasks = getRunningTasks(ctx);
             if (tasks == null) return -1;
-            int taskId = findNewLmoTask(tasks, packageName, target, taskIdsBefore, launchTime);
+            int taskId = findNotificationTask(tasks, packageName, target, userId,
+                    taskStatesBefore, launchTime, true);
             if (taskId >= 0) return taskId;
             SystemClock.sleep(80L);
         }
         return -1;
     }
 
-    private static Set<Integer> collectTaskIds(List<?> tasks) {
-        Set<Integer> ids = new HashSet<>();
+    private static Map<Integer, NotificationTaskSnapshot> snapshotNotificationTasks(
+            List<?> tasks) {
+        Map<Integer, NotificationTaskSnapshot> snapshots = new HashMap<>();
         for (Object task : tasks) {
-            try {
-                ids.add(task.getClass().getField("taskId").getInt(task));
-            } catch (Throwable ignored) {}
+            NotificationTaskSnapshot snapshot = readNotificationTaskSnapshot(task);
+            if (snapshot != null) snapshots.put(snapshot.taskId, snapshot);
         }
-        return ids;
+        return snapshots;
     }
 
-    private static int findNewLmoTask(List<?> tasks, String packageName,
-            ComponentName target, Set<Integer> taskIdsBefore, long launchTime) {
-        int fallbackTaskId = -1;
-        long fallbackActiveTime = Long.MIN_VALUE;
-        for (Object task : tasks) {
+    private static NotificationTaskSnapshot readNotificationTaskSnapshot(Object task) {
+        if (task == null) return null;
+        try {
+            Object taskIdValue = getFieldSystemUi(task, "taskId");
+            Object userIdValue = getFieldSystemUi(task, "userId");
+            if (!(taskIdValue instanceof Number)) return null;
+            int userId = userIdValue instanceof Number
+                    ? ((Number) userIdValue).intValue() : -1;
+            ComponentName top = null;
+            ComponentName base = null;
             try {
-                int taskId = task.getClass().getField("taskId").getInt(task);
-                if (taskIdsBefore.contains(taskId)) continue;
-                ComponentName top = (ComponentName) task.getClass()
-                        .getField("topActivity").get(task);
-                ComponentName base = (ComponentName) task.getClass()
-                        .getField("baseActivity").get(task);
-                ComponentName match = top != null ? top : base;
-                if (match == null || !packageName.equals(match.getPackageName())) continue;
-                if (target != null && !target.getClassName().equals(match.getClassName())
-                        && (base == null || !target.getClassName().equals(base.getClassName()))) {
-                    continue;
-                }
-                long activeTime = Long.MIN_VALUE;
-                try {
-                    activeTime = task.getClass().getField("lastActiveTime").getLong(task);
-                } catch (Throwable ignored) {}
-                if (activeTime >= launchTime || fallbackTaskId < 0) {
-                    if (activeTime >= fallbackActiveTime) {
-                        fallbackTaskId = taskId;
-                        fallbackActiveTime = activeTime;
-                    }
-                }
+                top = (ComponentName) getFieldSystemUi(task, "topActivity");
             } catch (Throwable ignored) {}
+            try {
+                base = (ComponentName) getFieldSystemUi(task, "baseActivity");
+            } catch (Throwable ignored) {}
+            Object activeTimeValue = getFieldSystemUi(task, "lastActiveTime");
+            long lastActiveTime = activeTimeValue instanceof Number
+                    ? ((Number) activeTimeValue).longValue() : -1L;
+            return new NotificationTaskSnapshot(((Number) taskIdValue).intValue(),
+                    userId, top, base, lastActiveTime);
+        } catch (Throwable ignored) {
+            return null;
         }
-        return fallbackTaskId;
     }
 
     private static int findNotificationTask(List<?> tasks, String packageName,
-            ComponentName target, long launchTime) {
-        int fallbackTaskId = -1;
-        long fallbackActiveTime = Long.MIN_VALUE;
+            ComponentName target, int userId,
+            Map<Integer, NotificationTaskSnapshot> taskStatesBefore, long launchTime,
+            boolean requireNewTask) {
+        NotificationTaskSnapshot best = null;
+        int bestTargetMatch = -1;
         for (Object task : tasks) {
-            try {
-                int taskId = task.getClass().getField("taskId").getInt(task);
-                ComponentName top = (ComponentName) task.getClass()
-                        .getField("topActivity").get(task);
-                ComponentName base = (ComponentName) task.getClass()
-                        .getField("baseActivity").get(task);
-                ComponentName match = top != null ? top : base;
-                if (match == null || !packageName.equals(match.getPackageName())) continue;
-                if (target != null && !target.getClassName().equals(match.getClassName())
-                        && (base == null || !target.getClassName().equals(base.getClassName()))) {
-                    continue;
-                }
-                long activeTime = Long.MIN_VALUE;
-                try {
-                    activeTime = task.getClass().getField("lastActiveTime").getLong(task);
-                } catch (Throwable ignored) {}
-                if (activeTime >= launchTime || fallbackTaskId < 0) {
-                    if (activeTime >= fallbackActiveTime) {
-                        fallbackTaskId = taskId;
-                        fallbackActiveTime = activeTime;
-                    }
-                }
-            } catch (Throwable ignored) {}
+            NotificationTaskSnapshot current = readNotificationTaskSnapshot(task);
+            if (current == null || current.userId < 0 || current.userId != userId) continue;
+            if (!packageName.equals(current.packageName())) continue;
+
+            NotificationTaskSnapshot before = taskStatesBefore.get(current.taskId);
+            boolean isNewTask = before == null;
+            if (requireNewTask && !isNewTask) continue;
+            boolean targetMatches = current.matches(target);
+            boolean activityChanged = before != null
+                    && (!java.util.Objects.equals(before.topActivity, current.topActivity)
+                    || !java.util.Objects.equals(before.baseActivity, current.baseActivity));
+            boolean activeTimeAdvanced = current.lastActiveTime >= launchTime
+                    || before != null && current.lastActiveTime > before.lastActiveTime;
+
+            // Never fall back to a merely same-package task. It must be new, or show
+            // a post-send activity/recency change in this notification's user.
+            if (isNewTask) {
+                if (target != null && !targetMatches && current.lastActiveTime < launchTime) continue;
+            } else if (!activityChanged && !activeTimeAdvanced) {
+                continue;
+            }
+
+            int targetMatchScore = targetMatches ? 1 : 0;
+            if (best == null || targetMatchScore > bestTargetMatch
+                    || targetMatchScore == bestTargetMatch
+                    && current.lastActiveTime > best.lastActiveTime) {
+                best = current;
+                bestTargetMatch = targetMatchScore;
+            }
         }
-        return fallbackTaskId;
+        return best != null ? best.taskId : -1;
     }
 
     private static boolean requestLmoFreeformForTask(Context ctx, String packageName,
@@ -2232,6 +2368,32 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
+    private static final class NotificationTaskSnapshot {
+        final int taskId;
+        final int userId;
+        final ComponentName topActivity;
+        final ComponentName baseActivity;
+        final long lastActiveTime;
+
+        NotificationTaskSnapshot(int taskId, int userId, ComponentName topActivity,
+                ComponentName baseActivity, long lastActiveTime) {
+            this.taskId = taskId;
+            this.userId = userId;
+            this.topActivity = topActivity;
+            this.baseActivity = baseActivity;
+            this.lastActiveTime = lastActiveTime;
+        }
+
+        String packageName() {
+            ComponentName component = topActivity != null ? topActivity : baseActivity;
+            return component != null ? component.getPackageName() : null;
+        }
+
+        boolean matches(ComponentName target) {
+            return target != null && (target.equals(topActivity) || target.equals(baseActivity));
+        }
+    }
+
     private static final class SwipeHandleView extends View {
         private final Paint barPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
@@ -2415,11 +2577,13 @@ public class MoreBubbleHookModule extends XposedModule {
                     for (Object candidate : (java.util.Collection<?>) bubbles) {
                         Object isAppBubble = invokeSystemUi(candidate, "isAppBubble");
                         Object candidatePackage = invokeSystemUi(candidate, "getPackageName");
+                        Object candidateKey = getBubbleKey(candidate);
                         if (Boolean.TRUE.equals(isAppBubble)
-                                && packageName.equals(candidatePackage)) {
+                                && packageName.equals(candidatePackage)
+                                && bubbleKey.equals(candidateKey)) {
                             bubble = candidate;
                             logDetailedInfo(context, reason
-                                    + ": found existing app Bubble by package after key lookup miss");
+                                    + ": found existing app Bubble by exact user-specific key");
                             break;
                         }
                     }
