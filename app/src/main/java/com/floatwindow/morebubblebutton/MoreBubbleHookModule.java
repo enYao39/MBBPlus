@@ -2575,26 +2575,43 @@ public class MoreBubbleHookModule extends XposedModule {
 
             Method setIntent = findMethodSystemUi(overflowBubble.getClass(),
                     "setAppBubbleIntent", Intent.class);
-            String intentSetter = "setAppBubbleIntent";
+            String intentUpdatePath = null;
+            if (setIntent != null) {
+                setIntent.invoke(overflowBubble, new Intent(submittedIntent));
+                intentUpdatePath = "method setAppBubbleIntent";
+            }
             if (setIntent == null) {
                 // Lunaris 16.2 stores TYPE_APP's launch Intent in Bubble.mIntent and exposes
                 // this package-private setter. Its overflow promotion path reuses the retained
                 // Bubble, so update the launch Intent before asking Shell to reinflate it.
                 setIntent = findMethodSystemUi(overflowBubble.getClass(), "setIntent", Intent.class);
-                intentSetter = "setIntent";
+                if (setIntent != null) {
+                    setIntent.invoke(overflowBubble, new Intent(submittedIntent));
+                    intentUpdatePath = "method setIntent";
+                }
             }
-            if (setIntent == null) {
+            if (intentUpdatePath == null) {
+                // Some shipped SystemUI builds keep Bubble.mIntent but omit both setters.
+                // The diagnostic path confirms this member is an Intent on that runtime.
+                java.lang.reflect.Field appIntent = findFieldSystemUi(
+                        overflowBubble.getClass(), "mIntent");
+                if (appIntent != null && Intent.class.isAssignableFrom(appIntent.getType())) {
+                    appIntent.setAccessible(true);
+                    appIntent.set(overflowBubble, new Intent(submittedIntent));
+                    intentUpdatePath = "field mIntent";
+                }
+            }
+            if (intentUpdatePath == null) {
                 logDetailedInfo(context, reason
-                        + ": overflow Bubble Intent setter unavailable (setAppBubbleIntent/setIntent)");
+                        + ": overflow Bubble Intent update API unavailable (setAppBubbleIntent/setIntent/mIntent)");
                 if (context != null && isDebugLoggingEnabled(context)) {
                     logDetailedInfo(context, reason + ": overflow Bubble class="
                             + describeBubbleIntentApi(overflowBubble));
                 }
                 return false;
             }
-            setIntent.invoke(overflowBubble, new Intent(submittedIntent));
             logDetailedInfo(context, reason + ": updated retained overflow Bubble Intent via "
-                    + intentSetter
+                    + intentUpdatePath
                     + " before promotion package=" + packageName);
 
             Method promote = findMethodSystemUi(controller.getClass(),
