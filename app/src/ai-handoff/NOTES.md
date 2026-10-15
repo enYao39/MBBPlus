@@ -36,9 +36,12 @@
 2. Bubble/Freeform 按钮在符合条件的非锁屏通知中显示；通知按钮和 Heads-up swipe handle 是两个独立开关，可以同时启用，关闭通知按钮不应隐式关闭 swipe handle。
 3. 横条只存在于 Heads-up popup，不要添加到普通通知列表或锁屏布局。横条的底部间距支持 `-10dp..24dp`，负值表示将横条向通知底部外侧下移。
 4. 新开关为 `swipe_handle_enabled`；读取时需兼容旧 `popup_presentation=1` 设置，确保升级后原有横条偏好继续生效。
-5. Freeform 启动失败时依次回退到 Bubble，再回退到全屏 PendingIntent。
-6. 文案统一使用 “Bubble”，不要重新引入 “Message Bubble”。
-7. 没有 root 时不能把“手动重启 SystemUI”当作模块功能；只能提示用户使用设备支持的重载方式。
+5. 在消费通知 PendingIntent 前，Freeform 路径准备失败时继续走现有 Bubble/全屏回退。PendingIntent 已发送后遇到异步 task 关联或移动失败，不得再次发送同一 PendingIntent；当前实现尝试用组件 Receiver 恢复，但可能丢失通知专属上下文，不能宣称深链一定保留。
+6. 通知 task 只能按通知所属用户和应用匹配；匹配时比较发送前 task 快照与发送后的 task 状态，不能仅凭包名接受第一个旧 task。通知所属 user ID 无法读取时，不要把它默认为个人用户 0 后继续 task move。
+7. 复用 app Bubble 时必须使用包含 Android 用户身份的精确 Bubble key；不能在 key 查找失败后只按包名挑选 Bubble。
+8. Heads-up swipe 对 auto-cancel 通知请求移除通知；对其他通知请求只移除 popup，不移除通知本身。待启动操作通过 Heads-up 状态轮询或 SystemUI 离场动画生命周期钩子触发；detach 本身不能作为启动信号。动画回调不是独立的 HUN 状态确认，修改相关逻辑时应保留这一区别。
+9. 文案统一使用 “Bubble”，不要重新引入 “Message Bubble”。
+10. 没有 root 时不能把“手动重启 SystemUI”当作模块功能；只能提示用户使用设备支持的重载方式。
 
 Recents 设置中的 Button position 控件嵌在 Bottom action bar 设置项下方，只在底部操作栏开启时展示。
 
@@ -52,6 +55,9 @@ Evolution 衍生系统可能不暴露传统的 `FEATURE_FREEFORM_WINDOW_MANAGEME
 - 传递通知原始 `PendingIntent` 时，`userId` 必须使用 LMO 的特殊值 `-100`，`taskId` 使用 `-1`，这样服务才会走 PendingIntent 分支并保留通知 deep-link/extras。
 - 该 Binder 接口要求 system UID；SystemUI 是独立的应用 UID，不能直接调用。SystemUI 路径应先发送原始 PendingIntent 创建真实任务，再通过导出的 Receiver 传递真实 `taskId`，让 LMO 将任务移动到 Freeform 显示。
 - 组件 Receiver 的 `taskId=-1` 路径只作为最后兼容回退；它按组件重新启动 Activity，可能丢失通知上下文，不应作为首选。
+- SystemUI task move 在发送 PendingIntent 前记录 task ID、user ID、top/base Activity 和活跃时间；之后仅接受同一通知用户、同一包且为新 task 或状态确有变化的 task。关联最多等待约 4 秒，再请求 Receiver 移动 task。
+- task 关联或 Receiver 请求在 PendingIntent 已发送后失败时，不要重发原 PendingIntent，以免同一通知启动两次。当前代码尝试以 `taskId=-1` 请求组件恢复；这不是等价的通知 Intent 回退，可能丢失通知的会话/深链上下文。
+- 如果通知所属 user ID 或运行 task 的 user ID 不可读，不要按默认用户 0 匹配或移动 task；应走尚未消费 PendingIntent 的其他打开路径，或明确报告 task 查询失败。
 
 公开参考仓库：
 [ProjectInfinity-X/packages_apps_LMOFreeform](https://github.com/ProjectInfinity-X/packages_apps_LMOFreeform)
@@ -63,6 +69,8 @@ Lunaris AOSP 3.12 的 `NotificationContentView.shouldShowBubbleButton` 可能接
 并继续保留非锁屏过滤与 swipe 模式按钮显示逻辑；不要因为适配 Lunaris 而恢复“swipe 隐藏按钮”的旧行为。
 
 ## 建议验证流程
+
+Heads-up swipe 的顺序核对要区分三种信号：`isHeadsUpState()` 轮询发现 popup 已退出、`setHeadsUpAnimatingAway(false)`、以及 `HeadsUpManagerImpl.onEntryAnimatingAwayEnded(entry)`。后两者是动画生命周期信号，不能描述成每次都重新检查了 HUN 状态；仅仅 detach 通知行也不能触发启动。非 auto-cancel 通知应保留在通知列表中。若收起请求后约 10 秒仍未观察到 popup 退出，当前实现会取消待启动操作。
 
 ```sh
 # 在模块仓库根目录执行
