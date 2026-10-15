@@ -1672,6 +1672,8 @@ public class MoreBubbleHookModule extends XposedModule {
                 Log.w(TAG, reason + ": LMO two-stage task was not created");
                 return;
             }
+            logFreeformTaskSnapshot(ctx, reason, component,
+                    taskId, "before_notification_intent");
             ActivityOptions options = ActivityOptions.makeBasic();
             setLaunchTaskId.invoke(options, taskId);
             setPendingIntentBackgroundStartAllowed(options);
@@ -1683,11 +1685,86 @@ public class MoreBubbleHookModule extends XposedModule {
             Log.i(TAG, reason + ": launched component in LMO Freeform, then delivered "
                     + "notification Intent into taskId=" + taskId + " for "
                     + component.flattenToShortString());
+            scheduleFreeformTaskSnapshots(ctx, reason, component, taskId);
         } catch (PendingIntent.CanceledException e) {
             Log.w(TAG, reason + ": notification PendingIntent canceled in LMO two-stage launch");
         } catch (Throwable t) {
             Log.w(TAG, reason + ": LMO two-stage Intent injection failed: "
                     + t.getMessage());
+        }
+    }
+
+    private static void scheduleFreeformTaskSnapshots(Context ctx, String reason,
+            ComponentName target, int taskId) {
+        if (!isDebugLoggingEnabled(ctx)) return;
+        Thread sampler = new Thread(() -> {
+            long[] delaysMs = {300L, 900L, 1600L};
+            for (long delayMs : delaysMs) {
+                SystemClock.sleep(delayMs);
+                if (!isDebugLoggingEnabled(ctx)) return;
+                long elapsedMs = delayMs;
+                if (delayMs == 900L) elapsedMs = 1200L;
+                else if (delayMs == 1600L) elapsedMs = 2800L;
+                logFreeformTaskSnapshot(ctx, reason, target, taskId,
+                        "after_notification_intent_" + elapsedMs + "ms");
+            }
+        }, "MoreBubble-Freeform-task-sampler");
+        sampler.setDaemon(true);
+        sampler.start();
+    }
+
+    private static void logFreeformTaskSnapshot(Context ctx, String reason,
+            ComponentName target, int expectedTaskId, String phase) {
+        if (!isDebugLoggingEnabled(ctx)) return;
+        List<?> tasks = getRunningTasks(ctx);
+        if (tasks == null) {
+            logDetailedInfo(ctx, reason + ": Freeform task snapshot phase=" + phase
+                    + " result=task-query-unavailable expectedTaskId=" + expectedTaskId);
+            return;
+        }
+
+        int matches = 0;
+        for (Object task : tasks) {
+            try {
+                int taskId = task.getClass().getField("taskId").getInt(task);
+                if (taskId != expectedTaskId) continue;
+                ComponentName top = (ComponentName) task.getClass()
+                        .getField("topActivity").get(task);
+                ComponentName base = (ComponentName) task.getClass()
+                        .getField("baseActivity").get(task);
+                int displayId = -1;
+                int windowingMode = 0;
+                try {
+                    Object display = getFieldSystemUi(task, "displayId");
+                    if (display instanceof Number) displayId = ((Number) display).intValue();
+                } catch (Throwable ignored) {}
+                try {
+                    Object configuration = getFieldSystemUi(task, "configuration");
+                    Object windowConfiguration = configuration != null
+                            ? invokeSystemUi(configuration, "getWindowConfiguration") : null;
+                    Object mode = windowConfiguration != null
+                            ? invokeSystemUi(windowConfiguration, "getWindowingMode") : null;
+                    if (mode instanceof Number) windowingMode = ((Number) mode).intValue();
+                } catch (Throwable ignored) {}
+                boolean targetVisible = target != null
+                        && (target.equals(top) || target.equals(base));
+                logDetailedInfo(ctx, reason + ": Freeform task snapshot phase=" + phase
+                        + " result=matched taskId=" + taskId + " displayId=" + displayId
+                        + " windowingMode=" + windowingMode
+                        + " targetMatchesTopOrBase=" + targetVisible
+                        + " top=" + flattenComponent(top)
+                        + " base=" + flattenComponent(base));
+                matches++;
+            } catch (Throwable t) {
+                logDetailedInfo(ctx, reason + ": Freeform task snapshot phase=" + phase
+                        + " result=task-entry-read-failed error="
+                        + t.getClass().getSimpleName());
+            }
+        }
+        if (matches == 0) {
+            logDetailedInfo(ctx, reason + ": Freeform task snapshot phase=" + phase
+                    + " result=task-id-not-found expectedTaskId=" + expectedTaskId
+                    + " queriedTaskCount=" + tasks.size());
         }
     }
 
