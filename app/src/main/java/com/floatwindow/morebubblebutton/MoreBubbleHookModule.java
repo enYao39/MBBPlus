@@ -2321,6 +2321,14 @@ public class MoreBubbleHookModule extends XposedModule {
             logIntentDetails(ctx, reason + ": Bubble submitted intent", finalIntent);
             Runnable work = () -> {
                 try {
+                    if (notif != null && notif.contentIntent != null
+                            && launchNotificationIntoExistingAppBubbleTask(controller, pkg,
+                            finalUser, notif.contentIntent, finalIntent, reason)) {
+                        runOnSysuiMain(bubblesManager,
+                                () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
+                        runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
+                        return;
+                    }
                     Class<?> bubbleBarLocCls = clOrNull(controller.getClass().getClassLoader(),
                             "com.android.wm.shell.shared.bubbles.BubbleBarLocation");
                     Method expand = findMethodSystemUi(controller.getClass(), "expandStackAndSelectBubble",
@@ -2367,6 +2375,153 @@ public class MoreBubbleHookModule extends XposedModule {
             return true;
         } catch (Throwable t) {
             Log.w(TAG, reason + ": app bubble schedule failed: " + t.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Deliver the notification's original PendingIntent into an already existing app Bubble's
+     * TaskView. App bubbles are keyed by package, so submitting another TYPE_APP Bubble with a
+     * different Intent can select the old Bubble without changing the TaskView it already owns.
+     */
+    private static boolean launchNotificationIntoExistingAppBubbleTask(Object controller,
+            String packageName, UserHandle user, PendingIntent notificationPendingIntent,
+            Intent submittedIntent, String reason) {
+        Context context = (Context) getFieldSystemUi(controller, "mContext");
+        if (context == null || packageName == null || user == null
+                || notificationPendingIntent == null) return false;
+
+        try {
+            ClassLoader classLoader = controller.getClass().getClassLoader();
+            Class<?> bubbleClass = classLoader.loadClass("com.android.wm.shell.bubbles.Bubble");
+            Method getKey = findMethodSystemUi(bubbleClass, "getAppBubbleKeyForApp",
+                    String.class, UserHandle.class);
+            if (getKey == null) {
+                logDetailedInfo(context, reason + ": existing app Bubble key API unavailable");
+                return false;
+            }
+            String bubbleKey = (String) getKey.invoke(null, packageName, user);
+            ControllerBubbleIntentResult lookup = readControllerAppBubbleIntent(controller, bubbleKey);
+            Object bubble = lookup.bubble;
+            if (bubble == null) {
+                Object bubbleData = getFieldSystemUi(controller, "mBubbleData");
+                Object bubbles = bubbleData != null
+                        ? invokeSystemUi(bubbleData, "getBubbles") : null;
+                if (bubbles instanceof java.util.Collection<?>) {
+                    for (Object candidate : (java.util.Collection<?>) bubbles) {
+                        Object isAppBubble = invokeSystemUi(candidate, "isAppBubble");
+                        Object candidatePackage = invokeSystemUi(candidate, "getPackageName");
+                        if (Boolean.TRUE.equals(isAppBubble)
+                                && packageName.equals(candidatePackage)) {
+                            bubble = candidate;
+                            logDetailedInfo(context, reason
+                                    + ": found existing app Bubble by package after key lookup miss");
+                            break;
+                        }
+                    }
+                }
+            }
+            if (bubble == null) {
+                logDetailedInfo(context, reason + ": existing app Bubble TaskView not found; lookup="
+                        + lookup.status + " method=" + lookup.lookupMethod
+                        + " selectedKey=" + lookup.selectedKey);
+                return false;
+            }
+
+            Object appBubble = invokeSystemUi(bubble, "isAppBubble");
+            if (appBubble instanceof Boolean && !((Boolean) appBubble)) {
+                logDetailedInfo(context, reason + ": matching Bubble key is not an app Bubble");
+                return false;
+            }
+
+            Object expandedView = invokeSystemUi(bubble, "getExpandedView");
+            if (expandedView == null) expandedView = getFieldSystemUi(bubble, "mExpandedView");
+            Object taskView = expandedView != null ? invokeSystemUi(expandedView, "getTaskView") : null;
+            if (taskView == null && expandedView != null) {
+                taskView = getFieldSystemUi(expandedView, "mTaskView");
+            }
+            if (taskView == null) {
+                Object bubbleBarView = invokeSystemUi(bubble, "getBubbleBarExpandedView");
+                if (bubbleBarView == null) {
+                    bubbleBarView = getFieldSystemUi(bubble, "mBubbleBarExpandedView");
+                }
+                Object taskViewHelper = bubbleBarView != null
+                        ? getFieldSystemUi(bubbleBarView, "mBubbleTaskViewHelper") : null;
+                if (taskViewHelper != null) {
+                    taskView = invokeSystemUi(taskViewHelper, "getTaskView");
+                    if (taskView == null) taskView = getFieldSystemUi(taskViewHelper, "mTaskView");
+                }
+            }
+            if (taskView == null) {
+                logDetailedInfo(context, reason + ": existing app Bubble has no ready TaskView"
+                        + " bubbleClass=" + bubble.getClass().getName()
+                        + " expandedView=" + (expandedView != null));
+                return false;
+            }
+
+            // Select the existing Bubble before sending the activity so the TaskView stays visible.
+            Object bubbleData = getFieldSystemUi(controller, "mBubbleData");
+            Method select = bubbleData != null
+                    ? findMethodSystemUi(bubbleData.getClass(), "setSelectedBubbleAndExpandStack",
+                    bubble.getClass()) : null;
+            if (select != null) {
+                select.invoke(bubbleData, bubble);
+            } else {
+                Method expandExisting = findMethodSystemUi(controller.getClass(),
+                        "expandStackAndSelectBubble", bubble.getClass());
+                if (expandExisting != null) expandExisting.invoke(controller, bubble);
+            }
+
+            ActivityOptions options = ActivityOptions.makeCustomAnimation(context,
+                    0 /* enter animation */, 0 /* exit animation */);
+            Method alwaysOnTop = findMethodSystemUi(options.getClass(), "setTaskAlwaysOnTop",
+                    boolean.class);
+            if (alwaysOnTop != null) alwaysOnTop.invoke(options, true);
+            Method launchedFromBubble = findMethodSystemUi(options.getClass(), "setLaunchedFromBubble",
+                    boolean.class);
+            if (launchedFromBubble != null) launchedFromBubble.invoke(options, true);
+            setPendingIntentBackgroundStartAllowed(options);
+
+            Rect launchBounds = new Rect();
+            Method getBounds = findMethodSystemUi(taskView.getClass(), "getBoundsOnScreen", Rect.class);
+            if (getBounds != null) getBounds.invoke(taskView, launchBounds);
+            if (launchBounds.isEmpty()) launchBounds = null;
+
+            Method startActivity = null;
+            for (Class<?> type = taskView.getClass(); type != null && startActivity == null;
+                    type = type.getSuperclass()) {
+                for (Method method : type.getDeclaredMethods()) {
+                    Class<?>[] parameters = method.getParameterTypes();
+                    if (method.getName().equals("startActivity") && parameters.length == 4
+                            && PendingIntent.class.isAssignableFrom(parameters[0])
+                            && Intent.class.isAssignableFrom(parameters[1])
+                            && ActivityOptions.class.isAssignableFrom(parameters[2])
+                            && Rect.class.isAssignableFrom(parameters[3])) {
+                        method.setAccessible(true);
+                        startActivity = method;
+                        break;
+                    }
+                }
+            }
+            if (startActivity == null) {
+                logDetailedInfo(context, reason + ": existing Bubble TaskView startActivity API unavailable"
+                        + " taskViewClass=" + taskView.getClass().getName());
+                return false;
+            }
+
+            startActivity.invoke(taskView, notificationPendingIntent, null, options, launchBounds);
+            logDetailedInfo(context, reason + ": delivered notification PendingIntent to existing Bubble TaskView"
+                    + " package=" + packageName + " bubbleKey=" + bubbleKey
+                    + " taskViewClass=" + taskView.getClass().getName()
+                    + " intent=" + summarizeIntent(submittedIntent));
+            Log.i(TAG, reason + ": routed notification into existing app Bubble TaskView for " + packageName);
+            scheduleBubbleTaskSnapshots(context, packageName, reason, "existing-taskview",
+                    controller, bubbleKey, submittedIntent);
+            return true;
+        } catch (Throwable t) {
+            logDetailedInfo(context, reason + ": existing Bubble TaskView route failed="
+                    + t.getClass().getSimpleName());
+            Log.w(TAG, reason + ": existing app Bubble TaskView route failed: " + t.getMessage());
             return false;
         }
     }
@@ -2699,6 +2854,7 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static final class ControllerBubbleIntentResult {
+        Object bubble;
         Intent intent;
         String status = "unknown";
         String bubbleDataClass = "none";
@@ -2763,6 +2919,7 @@ public class MoreBubbleHookModule extends XposedModule {
                 return result;
             }
             result.matchedKey = String.valueOf(getBubbleKey(bubble));
+            result.bubble = bubble;
             result.bubbleClass = bubble.getClass().getName();
             inspectBubbleIntentAccessors(bubble, result);
             result.status = result.intent == null
