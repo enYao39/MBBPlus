@@ -765,13 +765,18 @@ public class MoreBubbleHookModule extends XposedModule {
             Class<?> managerClass = cl.loadClass(
                     "com.android.systemui.statusbar.notification.headsup.HeadsUpManagerImpl");
             Set<String> hooked = new HashSet<>();
+            Set<String> managerActivityMethods = new HashSet<>(java.util.Arrays.asList(
+                    "showNotification", "updateNotification", "onEntryAdded",
+                    "onEntryUpdated", "onEntryRemoved", "removeNotification"));
             for (Class<?> type = managerClass; type != null; type = type.getSuperclass()) {
                 for (Method method : type.getDeclaredMethods()) {
                     String name = method.getName();
-                    if (!("onEntryAnimatingAwayEnded".equals(name)
+                    boolean lifecycleCallback = "onEntryAnimatingAwayEnded".equals(name)
                             || "onShadeOrQsExpanded".equals(name)
-                            || "onQsFullscreen".equals(name))
-                            || method.getParameterCount() != 1
+                            || "onQsFullscreen".equals(name);
+                    boolean managerActivity = managerActivityMethods.contains(name);
+                    if ((!lifecycleCallback && !managerActivity)
+                            || (lifecycleCallback && method.getParameterCount() != 1)
                             || !hooked.add(method.toGenericString())) continue;
                     method.setAccessible(true);
                     hook(method).intercept(chain -> {
@@ -1321,11 +1326,18 @@ public class MoreBubbleHookModule extends XposedModule {
             boolean removalRequested = requestHeadsUpPopupRemoval(row);
             if (pending != null) {
                 // If SystemUI does not expose its Heads-up manager, wait for its normal
-                // popup timeout/removal instead of launching Freeform over the popup.
-                // When removal was requested successfully, this waits for that removal.
+                // popup removal instead of launching Freeform over the popup. The native
+                // notification button also collapses the shade after opening; request the
+                // same collapse here so the popup does not have to wait for its full timeout.
+                boolean shadeCollapseRequested = false;
+                if (!removalRequested && sBubblesManager != null) {
+                    collapseShadeFromManager(sBubblesManager);
+                    shadeCollapseRequested = true;
+                }
                 if (!removalRequested && isDebugLoggingEnabled(handle.getContext())) {
                     logDetailedInfo(handle.getContext(), "Heads-up swipe: popup removal "
-                            + "request unavailable; waiting for popup dismissal");
+                            + "request unavailable; shadeCollapseRequested="
+                            + shadeCollapseRequested + "; waiting for popup dismissal");
                 }
                 waitForHeadsUpRemoval(pending, 0);
                 return true;
