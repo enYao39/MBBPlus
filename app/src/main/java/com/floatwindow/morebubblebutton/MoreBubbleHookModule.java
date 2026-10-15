@@ -2422,6 +2422,12 @@ public class MoreBubbleHookModule extends XposedModule {
                 }
             }
             if (bubble == null) {
+                if (promoteOverflowAppBubbleWithIntent(controller, packageName, user,
+                        bubbleKey, submittedIntent, reason)) {
+                    scheduleBubbleTaskSnapshots(context, packageName, reason, "overflow-app-bubble",
+                            controller, bubbleKey, submittedIntent);
+                    return true;
+                }
                 logDetailedInfo(context, reason + ": existing app Bubble TaskView not found; lookup="
                         + lookup.status + " method=" + lookup.lookupMethod
                         + " selectedKey=" + lookup.selectedKey);
@@ -2522,6 +2528,96 @@ public class MoreBubbleHookModule extends XposedModule {
             logDetailedInfo(context, reason + ": existing Bubble TaskView route failed="
                     + t.getClass().getSimpleName());
             Log.w(TAG, reason + ": existing app Bubble TaskView route failed: " + t.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * An app Bubble moved to overflow has no live TaskView. Update the retained Bubble Intent
+     * before asking Shell to promote/reinflate it, otherwise Shell can restore the old route.
+     */
+    private static boolean promoteOverflowAppBubbleWithIntent(Object controller, String packageName,
+            UserHandle user, String bubbleKey, Intent submittedIntent, String reason) {
+        Context context = (Context) getFieldSystemUi(controller, "mContext");
+        Object bubbleData = getFieldSystemUi(controller, "mBubbleData");
+        if (bubbleData == null) return false;
+        try {
+            Method getOverflow = findMethodSystemUi(bubbleData.getClass(),
+                    "getOverflowBubbleWithKey", String.class);
+            if (getOverflow == null) {
+                logDetailedInfo(context, reason + ": overflow app Bubble lookup API unavailable");
+                return false;
+            }
+            Object overflowBubble = getOverflow.invoke(bubbleData, bubbleKey);
+            if (overflowBubble == null) return false;
+
+            Object isAppBubble = invokeSystemUi(overflowBubble, "isAppBubble");
+            Object overflowPackage = invokeSystemUi(overflowBubble, "getPackageName");
+            if (Boolean.FALSE.equals(isAppBubble)
+                    || (overflowPackage != null && !packageName.equals(overflowPackage))) {
+                logDetailedInfo(context, reason + ": overflow key matched a non-app Bubble");
+                return false;
+            }
+
+            // This API handles overflow removal, Intent replacement, reinflation and expansion.
+            Method showOrHide = findMethodSystemUi(controller.getClass(), "showOrHideAppBubble",
+                    Intent.class, UserHandle.class, android.graphics.drawable.Icon.class);
+            if (showOrHide != null) {
+                android.graphics.drawable.Icon icon = buildAppBubbleIcon(
+                        controller, submittedIntent, packageName);
+                showOrHide.invoke(controller, new Intent(submittedIntent), user, icon);
+                logDetailedInfo(context, reason + ": updated and promoted overflow app Bubble through"
+                        + " showOrHideAppBubble package=" + packageName
+                        + " intent=" + summarizeIntent(submittedIntent));
+                Log.i(TAG, reason + ": updated overflow app Bubble route for " + packageName);
+                return true;
+            }
+
+            Method setIntent = findMethodSystemUi(overflowBubble.getClass(),
+                    "setAppBubbleIntent", Intent.class);
+            if (setIntent == null) {
+                logDetailedInfo(context, reason + ": overflow Bubble Intent setter unavailable");
+                return false;
+            }
+            setIntent.invoke(overflowBubble, new Intent(submittedIntent));
+            logDetailedInfo(context, reason + ": updated retained overflow Bubble Intent"
+                    + " before promotion package=" + packageName);
+
+            Method promote = findMethodSystemUi(controller.getClass(),
+                    "expandStackAndSelectBubble", overflowBubble.getClass());
+            if (promote != null) {
+                promote.invoke(controller, overflowBubble);
+            } else {
+                Object entryPoint = findEntryPoint(controller.getClass().getClassLoader(), "NOTIFICATION");
+                promote = null;
+                for (Method method : controller.getClass().getDeclaredMethods()) {
+                    Class<?>[] parameters = method.getParameterTypes();
+                    if (method.getName().equals("expandStackAndSelectAppBubble")
+                            && (parameters.length == 2 || parameters.length == 3)
+                            && parameters[0].isAssignableFrom(overflowBubble.getClass())) {
+                        method.setAccessible(true);
+                        promote = method;
+                        break;
+                    }
+                }
+                if (promote == null) {
+                    logDetailedInfo(context, reason + ": overflow Bubble promotion API unavailable");
+                    return false;
+                }
+                if (promote.getParameterCount() == 2) {
+                    promote.invoke(controller, overflowBubble, entryPoint);
+                } else {
+                    promote.invoke(controller, overflowBubble, entryPoint, null);
+                }
+            }
+            logDetailedInfo(context, reason + ": promoted overflow Bubble after Intent update"
+                    + " package=" + packageName);
+            Log.i(TAG, reason + ": promoted updated overflow app Bubble for " + packageName);
+            return true;
+        } catch (Throwable t) {
+            logDetailedInfo(context, reason + ": overflow app Bubble update failed="
+                    + t.getClass().getSimpleName());
+            Log.w(TAG, reason + ": overflow app Bubble update failed: " + t.getMessage());
             return false;
         }
     }
