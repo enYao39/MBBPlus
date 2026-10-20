@@ -34,6 +34,7 @@ import android.widget.Space;
 import android.widget.Toast;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -172,17 +173,156 @@ public class MoreBubbleHookModule extends XposedModule {
                 launchHookInstalled |= launchActivity;
                 newIntentHookInstalled |= deliverNewIntent;
             }
+            int launchCallHooks = hookActivityLaunchCalls(packageName, classLoader);
             if (installed == 0 || !launchHookInstalled || !newIntentHookInstalled) {
                 Log.w(TAG, "ActivityThread Intent diagnostics incomplete for " + packageName
                         + " hookedMethods=" + installed + " launch=" + launchHookInstalled
-                        + " newIntent=" + newIntentHookInstalled);
+                        + " newIntent=" + newIntentHookInstalled
+                        + " outgoingLaunchMethods=" + launchCallHooks);
             } else {
                 Log.i(TAG, "ActivityThread Intent diagnostics armed for scoped package " + packageName
-                        + " methods=" + installed);
+                        + " methods=" + installed + " outgoingLaunchMethods=" + launchCallHooks);
             }
         } catch (Throwable t) {
             Log.w(TAG, "ActivityThread Intent diagnostics unavailable for " + packageName
                     + ": " + t.getClass().getSimpleName() + ": " + t.getMessage());
+        }
+    }
+
+    /** Observe outgoing Activity launches in a scoped app, with details gated by Debug logging. */
+    private int hookActivityLaunchCalls(String packageName, ClassLoader classLoader) {
+        int installed = 0;
+        Set<String> hookedMethods = new HashSet<>();
+        try {
+            Class<?> activityClass = classLoader.loadClass("android.app.Activity");
+            Class<?> contextWrapperClass = classLoader.loadClass("android.content.ContextWrapper");
+            for (Class<?> type : new Class<?>[]{activityClass, contextWrapperClass}) {
+                for (Method method : type.getDeclaredMethods()) {
+                    String name = method.getName();
+                    if (!("startActivity".equals(name) || "startActivityAsUser".equals(name))
+                            || Modifier.isAbstract(method.getModifiers())
+                            || method.getParameterTypes().length == 0
+                            || method.getParameterTypes()[0] != Intent.class
+                            || !hookedMethods.add(method.toGenericString())) continue;
+                    try {
+                        method.setAccessible(true);
+                        hook(method).intercept(chain -> {
+                            Object receiver = chain.getThisObject();
+                            if (!(receiver instanceof Activity)) return chain.proceed();
+                            Activity source = (Activity) receiver;
+                            Intent target = chain.getArg(0) instanceof Intent
+                                    ? (Intent) chain.getArg(0) : null;
+                            if (!isDebugLoggingEnabled(source) || target == null) {
+                                return chain.proceed();
+                            }
+                            int optionsIndex = -1;
+                            for (int i = 1; i < method.getParameterTypes().length; i++) {
+                                if (android.os.Bundle.class.isAssignableFrom(
+                                        method.getParameterTypes()[i])) {
+                                    optionsIndex = i;
+                                    break;
+                                }
+                            }
+                            android.os.Bundle options = optionsIndex >= 0
+                                    && chain.getArg(optionsIndex) instanceof android.os.Bundle
+                                    ? (android.os.Bundle) chain.getArg(optionsIndex) : null;
+                            String launchId = logOutgoingActivityLaunch(source, packageName,
+                                    method, target, options);
+                            try {
+                                Object result = chain.proceed();
+                                logDetailedInfo(source, "Activity launch returned package="
+                                        + packageName + " launchId=" + launchId
+                                        + " method=" + method.getName() + " result=success");
+                                return result;
+                            } catch (Throwable t) {
+                                logDetailedInfo(source, "Activity launch failed package="
+                                        + packageName + " launchId=" + launchId
+                                        + " method=" + method.getName() + " error="
+                                        + t.getClass().getSimpleName());
+                                throw t;
+                            }
+                        });
+                        installed++;
+                    } catch (Throwable t) {
+                        Log.w(TAG, "Outgoing Activity launch hook failed package=" + packageName
+                                + " method=" + method.getName() + " owner="
+                                + type.getName() + " error=" + t.getClass().getSimpleName());
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Outgoing Activity launch diagnostics unavailable for " + packageName
+                    + ": " + t.getClass().getSimpleName());
+        }
+        if (installed == 0) {
+            Log.w(TAG, "Outgoing Activity launch diagnostics not installed for " + packageName);
+        }
+        return installed;
+    }
+
+    private static String logOutgoingActivityLaunch(Activity source, String packageName,
+            Method method, Intent target, android.os.Bundle options) {
+        String launchId = Long.toHexString(SystemClock.elapsedRealtimeNanos());
+        String sourceComponent = "unknown";
+        String taskId = "unknown";
+        String taskRoot = "unknown";
+        String launchedFromBubble = "unknown";
+        try { sourceComponent = flattenComponent(source.getComponentName()); } catch (Throwable ignored) {}
+        try { taskId = String.valueOf(source.getTaskId()); } catch (Throwable ignored) {}
+        try { taskRoot = String.valueOf(source.isTaskRoot()); } catch (Throwable ignored) {}
+        try {
+            Method bubbleMethod = Activity.class.getMethod("isLaunchedFromBubble");
+            launchedFromBubble = String.valueOf(bubbleMethod.invoke(source));
+        } catch (Throwable ignored) {}
+        logDetailedInfo(source, "Activity launch requested package=" + packageName
+                + " launchId=" + launchId + " method=" + method.getName()
+                + " sourceActivity=" + source.getClass().getName()
+                + " sourceComponent=" + sourceComponent + " sourceTaskId=" + taskId
+                + " sourceTaskRoot=" + taskRoot + " sourceIsBubble=" + launchedFromBubble
+                + " target=" + summarizeOutgoingIntent(target)
+                + " options=" + summarizeLaunchOptions(options));
+        return launchId;
+    }
+
+    /** Keep only routing information that can safely identify a URI destination. */
+    private static String summarizeOutgoingIntent(Intent intent) {
+        try {
+            ComponentName component = intent.getComponent();
+            Uri data = intent.getData();
+            String dataOrigin = data == null ? "none"
+                    : String.valueOf(data.getScheme()) + "://" + String.valueOf(data.getHost());
+            return "component=" + flattenComponent(component)
+                    + " package=" + String.valueOf(intent.getPackage())
+                    + " action=" + String.valueOf(intent.getAction())
+                    + " dataOrigin=" + dataOrigin
+                    + " flags=0x" + Integer.toHexString(intent.getFlags())
+                    + " categories=" + intent.getCategories();
+        } catch (Throwable t) {
+            return "unavailable:" + t.getClass().getSimpleName();
+        }
+    }
+
+    /** Log launch-option keys and only scalar values that describe task/window routing. */
+    private static String summarizeLaunchOptions(android.os.Bundle options) {
+        if (options == null || options.isEmpty()) return "none";
+        try {
+            java.util.TreeSet<String> keys = new java.util.TreeSet<>(options.keySet());
+            StringBuilder result = new StringBuilder("keys=").append(keys).append(" routing={");
+            boolean first = true;
+            for (String key : keys) {
+                String lower = key.toLowerCase(Locale.ROOT);
+                if (!(lower.contains("task") || lower.contains("display")
+                        || lower.contains("windowing") || lower.contains("launchroot"))) continue;
+                Object value;
+                try { value = options.get(key); } catch (Throwable ignored) { continue; }
+                if (!(value instanceof Number || value instanceof Boolean)) continue;
+                if (!first) result.append(", ");
+                result.append(key).append('=').append(value);
+                first = false;
+            }
+            return result.append('}').toString();
+        } catch (Throwable t) {
+            return "unavailable:" + t.getClass().getSimpleName();
         }
     }
 
