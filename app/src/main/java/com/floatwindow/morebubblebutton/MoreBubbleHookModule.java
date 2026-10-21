@@ -52,6 +52,9 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final String TAG = "MoreBubbleModule";
     private static View sSecondRow;
     private static final Set<String> sActivityIntentDiagnosticPackages = ConcurrentHashMap.newKeySet();
+    private static final Map<String, Long> sActivityDiagnosticHookTimes = new ConcurrentHashMap<>();
+    private static final ThreadLocal<OutgoingActivityLaunchTrace> sOutgoingActivityLaunchTrace =
+            new ThreadLocal<>();
     private ClassLoader mLauncherClassLoader;
     private static Object sBubblesManager;
     private static final String HEADS_UP_HANDLE_TAG = "more_bubble_heads_up_handle";
@@ -107,6 +110,7 @@ public class MoreBubbleHookModule extends XposedModule {
         ClassLoader classLoader = param.getDefaultClassLoader();
         if (packageName == null || classLoader == null
                 || !sActivityIntentDiagnosticPackages.add(packageName)) return;
+        sActivityDiagnosticHookTimes.put(packageName, SystemClock.elapsedRealtime());
         try {
             Class<?> activityThreadClass = classLoader.loadClass("android.app.ActivityThread");
             int installed = 0;
@@ -226,20 +230,35 @@ public class MoreBubbleHookModule extends XposedModule {
                             android.os.Bundle options = optionsIndex >= 0
                                     && chain.getArg(optionsIndex) instanceof android.os.Bundle
                                     ? (android.os.Bundle) chain.getArg(optionsIndex) : null;
-                            String launchId = logOutgoingActivityLaunch(source, packageName,
-                                    method, target, options);
+                            OutgoingActivityLaunchTrace trace = sOutgoingActivityLaunchTrace.get();
+                            boolean outermost = trace == null;
+                            if (outermost) {
+                                String sourceTaskId = "unknown";
+                                try { sourceTaskId = String.valueOf(source.getTaskId()); }
+                                catch (Throwable ignored) {}
+                                trace = new OutgoingActivityLaunchTrace(
+                                        Long.toHexString(SystemClock.elapsedRealtimeNanos()),
+                                        summarizeAppTasks(source, sourceTaskId));
+                                sOutgoingActivityLaunchTrace.set(trace);
+                            }
+                            trace.capture(method, target, options);
                             try {
                                 Object result = chain.proceed();
-                                logDetailedInfo(source, "Activity launch returned package="
-                                        + packageName + " launchId=" + launchId
-                                        + " method=" + method.getName() + " result=success");
+                                if (outermost) {
+                                    logOutgoingActivityLaunch(source, packageName, trace,
+                                            sActivityDiagnosticHookTimes.get(packageName), "returned");
+                                    scheduleAppTaskSnapshots(source, packageName, trace.launchId);
+                                }
                                 return result;
                             } catch (Throwable t) {
-                                logDetailedInfo(source, "Activity launch failed package="
-                                        + packageName + " launchId=" + launchId
-                                        + " method=" + method.getName() + " error="
-                                        + t.getClass().getSimpleName());
+                                if (outermost) {
+                                    logOutgoingActivityLaunch(source, packageName, trace,
+                                            sActivityDiagnosticHookTimes.get(packageName),
+                                            "failed:" + t.getClass().getSimpleName());
+                                }
                                 throw t;
+                            } finally {
+                                if (outermost) sOutgoingActivityLaunchTrace.remove();
                             }
                         });
                         installed++;
@@ -260,9 +279,8 @@ public class MoreBubbleHookModule extends XposedModule {
         return installed;
     }
 
-    private static String logOutgoingActivityLaunch(Activity source, String packageName,
-            Method method, Intent target, android.os.Bundle options) {
-        String launchId = Long.toHexString(SystemClock.elapsedRealtimeNanos());
+    private static void logOutgoingActivityLaunch(Activity source, String packageName,
+            OutgoingActivityLaunchTrace trace, Long hookTime, String result) {
         String sourceComponent = "unknown";
         String taskId = "unknown";
         String taskRoot = "unknown";
@@ -274,14 +292,80 @@ public class MoreBubbleHookModule extends XposedModule {
             Method bubbleMethod = Activity.class.getMethod("isLaunchedFromBubble");
             launchedFromBubble = String.valueOf(bubbleMethod.invoke(source));
         } catch (Throwable ignored) {}
-        logDetailedInfo(source, "Activity launch requested package=" + packageName
-                + " launchId=" + launchId + " method=" + method.getName()
+        long hookAgeMs = hookTime == null ? -1L
+                : Math.max(0L, SystemClock.elapsedRealtime() - hookTime);
+        logDetailedInfo(source, "Activity launch observed package=" + packageName
+                + " launchId=" + trace.launchId + " hookAgeMs=" + hookAgeMs
+                + " pid=" + android.os.Process.myPid() + " result=" + result
+                + " method=" + trace.method.getName()
                 + " sourceActivity=" + source.getClass().getName()
                 + " sourceComponent=" + sourceComponent + " sourceTaskId=" + taskId
                 + " sourceTaskRoot=" + taskRoot + " sourceIsBubble=" + launchedFromBubble
-                + " target=" + summarizeOutgoingIntent(target)
-                + " options=" + summarizeLaunchOptions(options));
-        return launchId;
+                + " target=" + summarizeOutgoingIntent(trace.target)
+                + " options=" + summarizeLaunchOptions(trace.options)
+                + " appTasksBefore=" + trace.appTasksBefore);
+    }
+
+    private static final class OutgoingActivityLaunchTrace {
+        final String launchId;
+        final String appTasksBefore;
+        Method method;
+        Intent target;
+        android.os.Bundle options;
+
+        OutgoingActivityLaunchTrace(String launchId, String appTasksBefore) {
+            this.launchId = launchId;
+            this.appTasksBefore = appTasksBefore;
+        }
+
+        void capture(Method method, Intent target, android.os.Bundle options) {
+            this.method = method;
+            this.target = target;
+            this.options = options;
+        }
+    }
+
+    /** Snapshot only this app's task IDs/components; never include Intent data or extras. */
+    private static String summarizeAppTasks(Activity activity, String sourceTaskId) {
+        try {
+            ActivityManager manager = (ActivityManager)
+                    activity.getSystemService(Context.ACTIVITY_SERVICE);
+            List<ActivityManager.AppTask> appTasks = manager != null ? manager.getAppTasks() : null;
+            if (appTasks == null) return "unavailable";
+            List<String> summaries = new java.util.ArrayList<>();
+            for (ActivityManager.AppTask appTask : appTasks) {
+                ActivityManager.RecentTaskInfo info = appTask.getTaskInfo();
+                if (info == null) continue;
+                summaries.add("{id=" + info.taskId
+                        + ",current=" + String.valueOf(info.taskId).equals(sourceTaskId)
+                        + ",running=" + info.isRunning
+                        + ",top=" + flattenComponent(info.topActivity)
+                        + ",base=" + flattenComponent(info.baseActivity) + "}");
+                if (summaries.size() >= 12) break;
+            }
+            return summaries.toString();
+        } catch (Throwable t) {
+            return "unavailable:" + t.getClass().getSimpleName();
+        }
+    }
+
+    /** Debug-only delayed task snapshots catch tasks created after the synchronous start call. */
+    private static void scheduleAppTaskSnapshots(Activity activity, String packageName,
+            String launchId) {
+        if (!isDebugLoggingEnabled(activity)) return;
+        long[] delaysMs = {150L, 600L, 1400L};
+        Handler handler = new Handler(Looper.getMainLooper());
+        for (long delayMs : delaysMs) {
+            handler.postDelayed(() -> {
+                if (!isDebugLoggingEnabled(activity)) return;
+                String sourceTaskId = "unknown";
+                try { sourceTaskId = String.valueOf(activity.getTaskId()); } catch (Throwable ignored) {}
+                logDetailedInfo(activity, "Activity launch task snapshot package=" + packageName
+                        + " launchId=" + launchId + " elapsedMs=" + delayMs
+                        + " sourceTaskId=" + sourceTaskId
+                        + " appTasks=" + summarizeAppTasks(activity, sourceTaskId));
+            }, delayMs);
+        }
     }
 
     /** Keep only routing information that can safely identify a URI destination. */
@@ -295,8 +379,10 @@ public class MoreBubbleHookModule extends XposedModule {
                     + " package=" + String.valueOf(intent.getPackage())
                     + " action=" + String.valueOf(intent.getAction())
                     + " dataOrigin=" + dataOrigin
+                    + " data=" + limitDebugValue(intent.getDataString())
                     + " flags=0x" + Integer.toHexString(intent.getFlags())
-                    + " categories=" + intent.getCategories();
+                    + " categories=" + intent.getCategories()
+                    + " extras=" + summarizeRoutingExtras(intent);
         } catch (Throwable t) {
             return "unavailable:" + t.getClass().getSimpleName();
         }
