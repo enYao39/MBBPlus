@@ -53,6 +53,8 @@ public class MoreBubbleHookModule extends XposedModule {
     private static View sSecondRow;
     private static final Set<String> sActivityIntentDiagnosticPackages = ConcurrentHashMap.newKeySet();
     private static final Map<String, Long> sActivityDiagnosticHookTimes = new ConcurrentHashMap<>();
+    private static final Map<String, Long> sBubbleTaskDiagnosticPackages = new ConcurrentHashMap<>();
+    private static final long BUBBLE_TASK_DIAGNOSTIC_WINDOW_MS = 15000L;
     private static final ThreadLocal<OutgoingActivityLaunchTrace> sOutgoingActivityLaunchTrace =
             new ThreadLocal<>();
     private ClassLoader mLauncherClassLoader;
@@ -302,8 +304,26 @@ public class MoreBubbleHookModule extends XposedModule {
                 + " sourceComponent=" + sourceComponent + " sourceTaskId=" + taskId
                 + " sourceTaskRoot=" + taskRoot + " sourceIsBubble=" + launchedFromBubble
                 + " target=" + summarizeOutgoingIntent(trace.target)
+                + " targetActivityTaskConfig=" + summarizeActivityTaskConfig(source, trace.target)
                 + " options=" + summarizeLaunchOptions(trace.options)
                 + " appTasksBefore=" + trace.appTasksBefore);
+    }
+
+    /** Resolve task-related manifest settings without logging notification payloads. */
+    private static String summarizeActivityTaskConfig(Activity source, Intent target) {
+        if (source == null || target == null) return "unavailable";
+        try {
+            android.content.pm.ResolveInfo resolved = source.getPackageManager()
+                    .resolveActivity(target, PackageManager.MATCH_DEFAULT_ONLY);
+            android.content.pm.ActivityInfo info = resolved != null ? resolved.activityInfo : null;
+            if (info == null) return "unresolved";
+            return "component=" + info.packageName + "/" + info.name
+                    + ",launchMode=" + info.launchMode
+                    + ",documentLaunchMode=" + info.documentLaunchMode
+                    + ",taskAffinity=" + String.valueOf(info.taskAffinity);
+        } catch (Throwable t) {
+            return "unavailable:" + t.getClass().getSimpleName();
+        }
     }
 
     private static final class OutgoingActivityLaunchTrace {
@@ -524,6 +544,7 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private void hookSystemUi(ClassLoader cl) {
         Log.i(TAG, "Hooking SystemUI...");
+        hookBubbleTaskLifecycleDiagnostics(cl);
         // 1. shouldShowBubbleButton: 让所有具备可打开入口的非锁屏通知显示按钮。
         //    Bubble 按钮与 Heads-up 下滑横条由独立设置控制。
         Class<?> contentViewClass = null;
@@ -841,6 +862,160 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) { Log.w(TAG, "Hook select guard: " + t.getMessage()); }
 
         Log.i(TAG, "All SystemUI hooks installed");
+    }
+
+    /** Observe which ShellTaskOrganizer listener actually owns Bubble-related tasks. */
+    private void hookBubbleTaskLifecycleDiagnostics(ClassLoader cl) {
+        int organizerHooks = 0;
+        int bubbleListenerHooks = 0;
+        try {
+            Class<?> organizerClass = cl.loadClass("com.android.wm.shell.ShellTaskOrganizer");
+            for (Method method : organizerClass.getDeclaredMethods()) {
+                String name = method.getName();
+                Class<?>[] parameters = method.getParameterTypes();
+                if (!("onTaskAppeared".equals(name) || "onTaskInfoChanged".equals(name)
+                        || "onTaskVanished".equals(name)) || parameters.length == 0
+                        || !"RunningTaskInfo".equals(parameters[0].getSimpleName())) continue;
+                method.setAccessible(true);
+                hook(method).intercept(chain -> {
+                    Object organizer = chain.getThisObject();
+                    Object taskInfo = chain.getArg(0);
+                    Context context = (Context) getFieldSystemUi(organizer, "mContext");
+                    if ("onTaskVanished".equals(name)) {
+                        logBubbleOrganizerTaskEvent(context, organizer, name, taskInfo);
+                    }
+                    Object result = chain.proceed();
+                    if (!"onTaskVanished".equals(name)) {
+                        logBubbleOrganizerTaskEvent(context, organizer, name, taskInfo);
+                    }
+                    return result;
+                });
+                organizerHooks++;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Bubble ShellTaskOrganizer diagnostics unavailable: "
+                    + t.getClass().getSimpleName());
+        }
+
+        // BubbleTaskViewHelper's TaskView.Listener callback carries the taskId and its
+        // enclosing helper carries the exact Bubble key. Hook that join point when present.
+        try {
+            Class<?> helperClass = cl.loadClass(
+                    "com.android.wm.shell.bubbles.BubbleTaskViewHelper");
+            for (Class<?> nestedClass : helperClass.getDeclaredClasses()) {
+                for (Method method : nestedClass.getDeclaredMethods()) {
+                    String name = method.getName();
+                    Class<?>[] parameters = method.getParameterTypes();
+                    boolean created = "onTaskCreated".equals(name) && parameters.length == 2
+                            && parameters[0] == int.class
+                            && ComponentName.class.isAssignableFrom(parameters[1]);
+                    boolean removed = "onTaskRemovalStarted".equals(name)
+                            && parameters.length == 1 && parameters[0] == int.class;
+                    if (!created && !removed) continue;
+                    method.setAccessible(true);
+                    hook(method).intercept(chain -> {
+                        Object result = chain.proceed();
+                        Object listener = chain.getThisObject();
+                        Object helper = getFieldSystemUi(listener, "this$0");
+                        if (helper == null) return result;
+                        Context context = (Context) getFieldSystemUi(helper, "mContext");
+                        if (!isDebugLoggingEnabled(context)) return result;
+                        Object bubble = getFieldSystemUi(helper, "mBubble");
+                        String packageName = getBubblePackageName(bubble);
+                        if (!isBubbleTaskDiagnosticActive(packageName)) return result;
+                        String bubbleKey = String.valueOf(invokeSystemUi(helper, "getBubbleKey"));
+                        int taskId = (int) chain.getArg(0);
+                        Object activity = created ? chain.getArg(1) : null;
+                        logDetailedInfo(context, "Bubble TaskView helper event=" + name
+                                + " package=" + packageName + " bubbleKey=" + bubbleKey
+                                + " taskId=" + taskId
+                                + " activity=" + flattenComponent(activity instanceof ComponentName
+                                ? (ComponentName) activity : null));
+                        return result;
+                    });
+                    bubbleListenerHooks++;
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Bubble TaskView helper diagnostics unavailable: "
+                    + t.getClass().getSimpleName());
+        }
+
+        Log.i(TAG, "Bubble task diagnostics hooks organizer=" + organizerHooks
+                + " helperListener=" + bubbleListenerHooks);
+    }
+
+    private static void logBubbleOrganizerTaskEvent(Context context, Object organizer,
+            String event, Object taskInfo) {
+        if (!isDebugLoggingEnabled(context) || taskInfo == null) return;
+        try {
+            int taskId = -1;
+            Object id = getFieldSystemUi(taskInfo, "taskId");
+            if (id instanceof Number) taskId = ((Number) id).intValue();
+            ComponentName top = (ComponentName) getFieldSystemUi(taskInfo, "topActivity");
+            ComponentName base = (ComponentName) getFieldSystemUi(taskInfo, "baseActivity");
+            String packageName = top != null ? top.getPackageName()
+                    : base != null ? base.getPackageName() : null;
+            if (!isBubbleTaskDiagnosticActive(packageName)) return;
+            Object display = getFieldSystemUi(taskInfo, "displayId");
+            Object user = getFieldSystemUi(taskInfo, "userId");
+            Object configuration = getFieldSystemUi(taskInfo, "configuration");
+            Object windowConfiguration = configuration != null
+                    ? invokeSystemUi(configuration, "getWindowConfiguration") : null;
+            Object windowingMode = windowConfiguration != null
+                    ? invokeSystemUi(windowConfiguration, "getWindowingMode") : null;
+            Object listeners = getFieldSystemUi(organizer, "mTaskListeners");
+            Object listener = getTaskOrganizerListener(listeners, taskId);
+            Object launchCookies = getFieldSystemUi(taskInfo, "launchCookies");
+            int launchCookieCount = launchCookies instanceof java.util.Collection<?>
+                    ? ((java.util.Collection<?>) launchCookies).size() : -1;
+            logDetailedInfo(context, "Bubble ShellTaskOrganizer task event=" + event
+                    + " package=" + packageName + " taskId=" + taskId
+                    + " userId=" + user + " displayId=" + display
+                    + " windowingMode=" + windowingMode
+                    + " top=" + flattenComponent(top) + " base=" + flattenComponent(base)
+                    + " listener=" + (listener == null ? "none" : listener.getClass().getName())
+                    + " launchCookieCount=" + launchCookieCount);
+        } catch (Throwable t) {
+            logDetailedInfo(context, "Bubble ShellTaskOrganizer task event=" + event
+                    + " failed=" + t.getClass().getSimpleName());
+        }
+    }
+
+    private static Object getTaskOrganizerListener(Object listeners, int taskId) {
+        if (listeners == null) return null;
+        try {
+            for (Class<?> type = listeners.getClass(); type != null; type = type.getSuperclass()) {
+                for (Method method : type.getDeclaredMethods()) {
+                    if (!"get".equals(method.getName()) || method.getParameterCount() != 1
+                            || method.getParameterTypes()[0] != int.class) continue;
+                    method.setAccessible(true);
+                    return method.invoke(listeners, taskId);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static String getBubblePackageName(Object bubble) {
+        if (bubble == null) return null;
+        Object packageName = invokeSystemUi(bubble, "getPackageName");
+        return packageName instanceof String ? (String) packageName : null;
+    }
+
+    private static void trackBubbleTaskDiagnosticPackage(String packageName, Context context) {
+        if (!isDebugLoggingEnabled(context) || packageName == null) return;
+        sBubbleTaskDiagnosticPackages.put(packageName,
+                SystemClock.elapsedRealtime() + BUBBLE_TASK_DIAGNOSTIC_WINDOW_MS);
+    }
+
+    private static boolean isBubbleTaskDiagnosticActive(String packageName) {
+        if (packageName == null) return false;
+        Long expiresAt = sBubbleTaskDiagnosticPackages.get(packageName);
+        if (expiresAt == null) return false;
+        if (SystemClock.elapsedRealtime() <= expiresAt) return true;
+        sBubbleTaskDiagnosticPackages.remove(packageName, expiresAt);
+        return false;
     }
 
     /**
@@ -2680,6 +2855,7 @@ public class MoreBubbleHookModule extends XposedModule {
                 }
                 Log.i(TAG, reason + ": freeform unavailable, falling back to Bubble");
             }
+            trackBubbleTaskDiagnosticPackage(pkg, ctx);
             Intent targetIntent = getNotificationTargetIntent(notif, pkg);
             Intent launchIntent = ctx != null ? ctx.getPackageManager().getLaunchIntentForPackage(pkg) : null;
             boolean usingLaunchFallback = targetIntent == null;

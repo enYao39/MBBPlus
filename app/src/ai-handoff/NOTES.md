@@ -42,6 +42,7 @@
 8. Heads-up swipe 对 auto-cancel 通知请求移除通知；对其他通知请求只移除 popup，不移除通知本身。待启动操作通过 Heads-up 状态轮询或 SystemUI 离场动画生命周期钩子触发；detach 本身不能作为启动信号。动画回调不是独立的 HUN 状态确认，修改相关逻辑时应保留这一区别。
 9. 文案统一使用 “Bubble”，不要重新引入 “Message Bubble”。
 10. 没有 root 时不能把“手动重启 SystemUI”当作模块功能；只能提示用户使用设备支持的重载方式。
+11. Bubble task 诊断只在 Debug 详细日志开启且 Bubble 路由发生后的短时窗口内输出：记录 ShellTaskOrganizer 对目标应用 task 的 listener 归属、Bubble TaskView helper 的 Bubble key/task ID 关联，以及应用进程解析出的目标 Activity `launchMode`、`documentLaunchMode` 和 `taskAffinity`。task 快照缺失不能等同于 task 不存在；要区分 Organizer 无 listener、Bubble helper 已回调和查询失败。
 
 Recents 设置中的 Button position 控件嵌在 Bottom action bar 设置项下方，只在底部操作栏开启时展示。
 
