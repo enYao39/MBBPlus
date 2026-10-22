@@ -55,6 +55,9 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final Map<String, Long> sActivityDiagnosticHookTimes = new ConcurrentHashMap<>();
     private static final Map<String, Long> sBubbleTaskDiagnosticPackages = new ConcurrentHashMap<>();
     private static final long BUBBLE_TASK_DIAGNOSTIC_WINDOW_MS = 15000L;
+    private static final String REDDIT_PACKAGE = "com.reddit.frontpage";
+    private static final Map<String, LunarisRedditOverflowLaunch> sLunarisRedditOverflowLaunches =
+            new ConcurrentHashMap<>();
     private static final ThreadLocal<OutgoingActivityLaunchTrace> sOutgoingActivityLaunchTrace =
             new ThreadLocal<>();
     private ClassLoader mLauncherClassLoader;
@@ -919,13 +922,17 @@ public class MoreBubbleHookModule extends XposedModule {
                         Object helper = getFieldSystemUi(listener, "this$0");
                         if (helper == null) return result;
                         Context context = (Context) getFieldSystemUi(helper, "mContext");
-                        if (!isDebugLoggingEnabled(context)) return result;
                         Object bubble = getFieldSystemUi(helper, "mBubble");
-                        String packageName = getBubblePackageName(bubble);
-                        if (!isBubbleTaskDiagnosticActive(packageName)) return result;
                         String bubbleKey = String.valueOf(invokeSystemUi(helper, "getBubbleKey"));
                         int taskId = (int) chain.getArg(0);
                         Object activity = created ? chain.getArg(1) : null;
+                        if (created) {
+                            completeLunarisRedditOverflowLaunch(helper, bubbleKey, taskId,
+                                    context);
+                        }
+                        if (!isDebugLoggingEnabled(context)) return result;
+                        String packageName = getBubblePackageName(bubble);
+                        if (!isBubbleTaskDiagnosticActive(packageName)) return result;
                         logDetailedInfo(context, "Bubble TaskView helper event=" + name
                                 + " package=" + packageName + " bubbleKey=" + bubbleKey
                                 + " taskId=" + taskId
@@ -2666,6 +2673,18 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
+    private static String getSystemProperty(String key, String defaultValue) {
+        try {
+            Class<?> systemProperties = Class.forName("android.os.SystemProperties");
+            Method get = systemProperties.getDeclaredMethod("get", String.class, String.class);
+            get.setAccessible(true);
+            Object value = get.invoke(null, key, defaultValue);
+            return value instanceof String ? ((String) value).trim() : defaultValue;
+        } catch (Throwable ignored) {
+            return defaultValue;
+        }
+    }
+
     private static boolean configureFreeformOptions(ActivityOptions options, Context ctx,
             boolean setBounds) {
         try {
@@ -2891,7 +2910,7 @@ public class MoreBubbleHookModule extends XposedModule {
                 try {
                     if (notif != null && notif.contentIntent != null
                             && launchNotificationIntoExistingAppBubbleTask(controller, pkg,
-                            finalUser, notif.contentIntent, finalIntent, reason)) {
+                            finalUser, notif.contentIntent, finalIntent, launchIntent, reason)) {
                         runOnSysuiMain(bubblesManager,
                                 () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
                         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
@@ -2954,7 +2973,7 @@ public class MoreBubbleHookModule extends XposedModule {
      */
     private static boolean launchNotificationIntoExistingAppBubbleTask(Object controller,
             String packageName, UserHandle user, PendingIntent notificationPendingIntent,
-            Intent submittedIntent, String reason) {
+            Intent submittedIntent, Intent launchIntent, String reason) {
         Context context = (Context) getFieldSystemUi(controller, "mContext");
         if (context == null || packageName == null || user == null
                 || notificationPendingIntent == null) return false;
@@ -2993,7 +3012,7 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             if (bubble == null) {
                 if (promoteOverflowAppBubbleWithIntent(controller, packageName, user,
-                        bubbleKey, submittedIntent, reason)) {
+                        bubbleKey, submittedIntent, notificationPendingIntent, launchIntent, reason)) {
                     scheduleBubbleTaskSnapshots(context, packageName, reason, "overflow-app-bubble",
                             controller, bubbleKey, submittedIntent);
                     return true;
@@ -3107,7 +3126,8 @@ public class MoreBubbleHookModule extends XposedModule {
      * before asking Shell to promote/reinflate it, otherwise Shell can restore the old route.
      */
     private static boolean promoteOverflowAppBubbleWithIntent(Object controller, String packageName,
-            UserHandle user, String bubbleKey, Intent submittedIntent, String reason) {
+            UserHandle user, String bubbleKey, Intent submittedIntent,
+            PendingIntent notificationPendingIntent, Intent launchIntent, String reason) {
         Context context = (Context) getFieldSystemUi(controller, "mContext");
         Object bubbleData = getFieldSystemUi(controller, "mBubbleData");
         if (bubbleData == null) return false;
@@ -3127,6 +3147,13 @@ public class MoreBubbleHookModule extends XposedModule {
                     || (overflowPackage != null && !packageName.equals(overflowPackage))) {
                 logDetailedInfo(context, reason + ": overflow key matched a non-app Bubble");
                 return false;
+            }
+
+            if (isLunarisRedditOverflowPatchEnabled(context, packageName)
+                    && notificationPendingIntent != null && launchIntent != null) {
+                return promoteLunarisRedditOverflowBubble(controller, overflowBubble,
+                        packageName, user, bubbleKey, launchIntent, submittedIntent,
+                        notificationPendingIntent, reason, context);
             }
 
             // This API handles overflow removal, Intent replacement, reinflation and expansion.
@@ -3220,6 +3247,197 @@ public class MoreBubbleHookModule extends XposedModule {
                     + t.getClass().getSimpleName());
             Log.w(TAG, reason + ": overflow app Bubble update failed: " + t.getMessage());
             return false;
+        }
+    }
+
+    private static boolean isLunarisRedditOverflowPatchEnabled(Context context,
+            String packageName) {
+        return context != null && REDDIT_PACKAGE.equals(packageName)
+                && !getSystemProperty("ro.lunaris.maintainer", "").isEmpty();
+    }
+
+    /**
+     * Lunaris can reinflate an overflow Reddit Bubble without retaining a live TaskView. Seed
+     * that Bubble with Reddit's launcher Activity first, then deliver the notification's original
+     * PendingIntent into the newly-created Bubble TaskView so its deep link is resolved there.
+     */
+    private static boolean promoteLunarisRedditOverflowBubble(Object controller,
+            Object overflowBubble, String packageName, UserHandle user, String bubbleKey,
+            Intent launchIntent, Intent submittedIntent, PendingIntent notificationPendingIntent,
+            String reason, Context context) {
+        LunarisRedditOverflowLaunch pending = new LunarisRedditOverflowLaunch(
+                SystemClock.elapsedRealtime(), packageName, notificationPendingIntent);
+        sLunarisRedditOverflowLaunches.put(bubbleKey, pending);
+        try {
+            Method setIntent = findMethodSystemUi(overflowBubble.getClass(),
+                    "setAppBubbleIntent", Intent.class);
+            if (setIntent == null) {
+                setIntent = findMethodSystemUi(overflowBubble.getClass(), "setIntent", Intent.class);
+            }
+            if (setIntent != null) {
+                setIntent.invoke(overflowBubble, new Intent(launchIntent));
+            } else {
+                java.lang.reflect.Field appIntent = findFieldSystemUi(
+                        overflowBubble.getClass(), "mIntent");
+                if (appIntent == null || !Intent.class.isAssignableFrom(appIntent.getType())) {
+                    sLunarisRedditOverflowLaunches.remove(bubbleKey, pending);
+                    logDetailedInfo(context, reason + ": Lunaris Reddit overflow seed Intent API unavailable");
+                    return false;
+                }
+                appIntent.setAccessible(true);
+                appIntent.set(overflowBubble, new Intent(launchIntent));
+            }
+
+            Method promote = findMethodSystemUi(controller.getClass(),
+                    "expandStackAndSelectBubble", overflowBubble.getClass());
+            if (promote != null) {
+                promote.invoke(controller, overflowBubble);
+            } else {
+                Object entryPoint = findEntryPoint(controller.getClass().getClassLoader(), "NOTIFICATION");
+                for (Method method : controller.getClass().getDeclaredMethods()) {
+                    Class<?>[] parameters = method.getParameterTypes();
+                    if (method.getName().equals("expandStackAndSelectAppBubble")
+                            && (parameters.length == 2 || parameters.length == 3)
+                            && parameters[0].isAssignableFrom(overflowBubble.getClass())) {
+                        method.setAccessible(true);
+                        promote = method;
+                        break;
+                    }
+                }
+                if (promote == null) {
+                    sLunarisRedditOverflowLaunches.remove(bubbleKey, pending);
+                    logDetailedInfo(context, reason + ": Lunaris Reddit overflow promotion API unavailable");
+                    return false;
+                }
+                if (promote.getParameterCount() == 2) {
+                    promote.invoke(controller, overflowBubble, entryPoint);
+                } else {
+                    promote.invoke(controller, overflowBubble, entryPoint, null);
+                }
+            }
+            logDetailedInfo(context, reason + ": Lunaris Reddit overflow seeded Bubble TaskView"
+                    + " bubbleKey=" + bubbleKey + " intent=" + summarizeIntent(launchIntent));
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                if (sLunarisRedditOverflowLaunches.remove(bubbleKey, pending)) {
+                    // Preserve the notification action if the Bubble TaskView never becomes
+                    // ready; this last-resort send may open outside the Bubble.
+                    boolean sent = sendLunarisRedditOverflowFallback(pending, context);
+                    if (isDebugLoggingEnabled(context)) {
+                        logDetailedInfo(context, reason + ": Lunaris Reddit Bubble TaskView callback timeout"
+                                + " fallbackPendingIntentSent=" + sent);
+                    }
+                }
+            }, 8000L);
+            return true;
+        } catch (Throwable t) {
+            sLunarisRedditOverflowLaunches.remove(bubbleKey, pending);
+            logDetailedInfo(context, reason + ": Lunaris Reddit overflow seed failed="
+                    + t.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    private static void completeLunarisRedditOverflowLaunch(Object helper, String bubbleKey,
+            int taskId, Context context) {
+        LunarisRedditOverflowLaunch pending = sLunarisRedditOverflowLaunches.get(bubbleKey);
+        if (pending == null || !REDDIT_PACKAGE.equals(pending.packageName)
+                || SystemClock.elapsedRealtime() - pending.createdAt > 8000L
+                || !isLunarisRedditOverflowPatchEnabled(context, pending.packageName)) return;
+        Object bubble = getFieldSystemUi(helper, "mBubble");
+        if (!pending.packageName.equals(getBubblePackageName(bubble))) return;
+        Object taskView = invokeSystemUi(helper, "getTaskView");
+        if (taskView == null) taskView = getFieldSystemUi(helper, "mTaskView");
+        if (taskView == null) {
+            if (isDebugLoggingEnabled(context)) {
+                logDetailedInfo(context, "Lunaris Reddit Bubble TaskView callback has no TaskView"
+                        + " bubbleKey=" + bubbleKey + " taskId=" + taskId);
+            }
+            return;
+        }
+        if (!sLunarisRedditOverflowLaunches.remove(bubbleKey, pending)) return;
+        try {
+            ActivityOptions options = ActivityOptions.makeCustomAnimation(context, 0, 0);
+            Method alwaysOnTop = findMethodSystemUi(options.getClass(), "setTaskAlwaysOnTop",
+                    boolean.class);
+            if (alwaysOnTop != null) alwaysOnTop.invoke(options, true);
+            Method launchedFromBubble = findMethodSystemUi(options.getClass(),
+                    "setLaunchedFromBubble", boolean.class);
+            if (launchedFromBubble != null) launchedFromBubble.invoke(options, true);
+            setPendingIntentBackgroundStartAllowed(options);
+            if (!startPendingIntentInTaskView(taskView, pending.notificationPendingIntent,
+                    options, context)) {
+                boolean fallbackSent = sendLunarisRedditOverflowFallback(pending, context);
+                if (isDebugLoggingEnabled(context)) {
+                    logDetailedInfo(context, "Lunaris Reddit notification PendingIntent delivery failed"
+                            + " bubbleKey=" + bubbleKey + " taskId=" + taskId
+                            + " fallbackPendingIntentSent=" + fallbackSent);
+                }
+                return;
+            }
+            logDetailedInfo(context, "Lunaris Reddit notification PendingIntent delivered to Bubble TaskView"
+                    + " bubbleKey=" + bubbleKey + " taskId=" + taskId);
+        } catch (Throwable t) {
+            boolean fallbackSent = sendLunarisRedditOverflowFallback(pending, context);
+            if (isDebugLoggingEnabled(context)) {
+                logDetailedInfo(context, "Lunaris Reddit Bubble TaskView delivery exception="
+                        + t.getClass().getSimpleName()
+                        + " fallbackPendingIntentSent=" + fallbackSent);
+            }
+        }
+    }
+
+    private static boolean sendLunarisRedditOverflowFallback(
+            LunarisRedditOverflowLaunch pending, Context context) {
+        try {
+            pending.notificationPendingIntent.send();
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "Lunaris Reddit overflow fallback PendingIntent failed: "
+                    + t.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    private static boolean startPendingIntentInTaskView(Object taskView,
+            PendingIntent pendingIntent, ActivityOptions options, Context context) {
+        try {
+            Rect launchBounds = new Rect();
+            Method getBounds = findMethodSystemUi(taskView.getClass(), "getBoundsOnScreen", Rect.class);
+            if (getBounds != null) getBounds.invoke(taskView, launchBounds);
+            if (launchBounds.isEmpty()) launchBounds = null;
+            for (Class<?> type = taskView.getClass(); type != null; type = type.getSuperclass()) {
+                for (Method method : type.getDeclaredMethods()) {
+                    Class<?>[] parameters = method.getParameterTypes();
+                    if (method.getName().equals("startActivity") && parameters.length == 4
+                            && PendingIntent.class.isAssignableFrom(parameters[0])
+                            && Intent.class.isAssignableFrom(parameters[1])
+                            && ActivityOptions.class.isAssignableFrom(parameters[2])
+                            && Rect.class.isAssignableFrom(parameters[3])) {
+                        method.setAccessible(true);
+                        method.invoke(taskView, pendingIntent, null, options, launchBounds);
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            if (isDebugLoggingEnabled(context)) {
+                logDetailedInfo(context, "Bubble TaskView startActivity failed="
+                        + t.getClass().getSimpleName());
+            }
+        }
+        return false;
+    }
+
+    private static final class LunarisRedditOverflowLaunch {
+        final long createdAt;
+        final String packageName;
+        final PendingIntent notificationPendingIntent;
+
+        LunarisRedditOverflowLaunch(long createdAt, String packageName,
+                PendingIntent notificationPendingIntent) {
+            this.createdAt = createdAt;
+            this.packageName = packageName;
+            this.notificationPendingIntent = notificationPendingIntent;
         }
     }
 
