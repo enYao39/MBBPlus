@@ -19,20 +19,11 @@ android {
         applicationId = "com.floatwindow.morebubblebutton"
         minSdk = 36
         targetSdk = 37
-        versionCode = 64
-        versionName = "1.7.56"
+        versionCode = 65
+        versionName = "1.7.57"
     }
 
     signingConfigs {
-        getByName("debug") {
-            val localKeystore = file("[LOCAL_PATH_REDACTED]")
-            if (localKeystore.exists()) {
-                storeFile = localKeystore
-                storePassword = "android"
-                keyAlias = "androiddebugkey"
-                keyPassword = "android"
-            }
-        }
         create("release") {
             // CI: read from environment variables (GitHub Secrets)
             // Local: read from local.properties (not committed to VCS)
