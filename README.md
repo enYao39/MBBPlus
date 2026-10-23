@@ -1,10 +1,10 @@
 # MoreBubbleButton
 
-MoreBubbleButton 是一个 Android/Xposed 模块；本项目 fork 后的全部修改均由 AICoding 完成，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心添加 Bubble/Freeform 能力。
+MoreBubbleButton 是一个 Android/Xposed 模块，为 Pixel Launcher 最近任务界面和 SystemUI 通知中心添加 Bubble/Freeform 能力。本 fork 基于 [TYOPXN360/MoreBubbleButton](https://github.com/TYOPXN360/MoreBubbleButton)，由 OpenAI Codex 协助维护。
 
 > Evolution 17 是当前主要实机验证基线；Lunaris AOSP 3.12 已针对通知注入路径做过兼容性验证。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
 
-当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档对应版本为 `1.7.49 (57)`。
+当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档对应版本为 `1.7.54 (62)`。
 
 ## 功能
 
@@ -150,9 +150,11 @@ Release 构建启用 R8 minify 与 resource shrink，并移除调试工具依赖
 没有正式 keystore 时仅为方便本地验证回退到 debug keystore，该 APK 不应作为正式发布签名包分发。
 Release APK 通常显著小于 Debug APK，交付前应优先检查 `app/build/outputs/apk/release/app-release.apk`。
 
-## AI 声明与验证边界
+## 贡献者与验证边界
 
-本项目 fork 后的全部修改（包括代码、重构、问题排查、文档和构建修改）均由 aicode 完成；人工仅提供需求、设备环境和实际体验反馈。Evolution 17 是主要验证基线，Lunaris AOSP 3.12 只对当前通知注入兼容路径做过验证，任何其他设备或未覆盖功能都必须重新测试。
+上游作者：TYOPXN360。Codex 参与本 fork 的代码与文档维护，相关修改由用户审核和实机反馈。
+
+Evolution 17 是主要验证基线；Lunaris AOSP 3.12 只验证过部分通知路径，其他设备与功能仍需单独测试。
 
 ## 让其他 AI Agent 接手
 
@@ -178,4 +180,6 @@ Agent 接手时应遵循以下顺序：
 
 ## License
 
-Apache License 2.0
+本 fork 使用 **GNU GPL-3.0-only**，完整文本见 [LICENSE](LICENSE)。
+
+上游 MoreBubbleButton 由 TYOPXN360 发布，原仓库声明使用 **Apache License 2.0**；其来源和归属见 [NOTICE](NOTICE)，Apache 2.0 文本见 [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0)。

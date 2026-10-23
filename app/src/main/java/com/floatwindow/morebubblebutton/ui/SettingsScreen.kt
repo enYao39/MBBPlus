@@ -72,6 +72,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -103,6 +104,12 @@ fun SettingsScreen() {
     }
     var actionBarOrder by remember { mutableIntStateOf(ModuleSettings.getActionBarOrder(ctx)) }
     var showActionBarSettings by remember { mutableStateOf(false) }
+    var recentsExpanded by remember { mutableStateOf(false) }
+    var notificationsExpanded by remember { mutableStateOf(false) }
+    var headsUpExpanded by remember { mutableStateOf(false) }
+    var actionsExpanded by remember { mutableStateOf(false) }
+    var diagnosticsExpanded by remember { mutableStateOf(false) }
+    var aboutExpanded by remember { mutableStateOf(false) }
     var systemUiBubbleEnabled by remember { mutableStateOf(ModuleSettings.isSystemUiBubbleEnabled(ctx)) }
     var openMode by remember { mutableIntStateOf(ModuleSettings.getOpenMode(ctx)) }
     var swipeHandleEnabled by remember { mutableStateOf(ModuleSettings.isSwipeHandleEnabled(ctx)) }
@@ -263,7 +270,12 @@ fun SettingsScreen() {
         } else {
         item { HeaderCard() }
 
-        item { SectionHeading(Icons.Default.Build, R.string.section_recents) }
+        item {
+            SectionHeading(Icons.Default.Build, R.string.section_recents, recentsExpanded) {
+                recentsExpanded = !recentsExpanded
+            }
+        }
+        if (recentsExpanded) {
         item {
             SettingsCard {
                 PreferenceSwitchRow(
@@ -298,8 +310,13 @@ fun SettingsScreen() {
                 }
             }
         }
+        }
 
-        item { SectionHeading(Icons.Default.Notifications, R.string.section_notifications) }
+        item {
+            SectionHeading(Icons.Default.Notifications, R.string.section_notifications,
+                notificationsExpanded) { notificationsExpanded = !notificationsExpanded }
+        }
+        if (notificationsExpanded) {
         item {
             SettingsCard {
                 PreferenceSwitchRow(
@@ -328,8 +345,14 @@ fun SettingsScreen() {
                 )
             }
         }
+        }
 
-        item { SectionHeading(Icons.Default.Settings, R.string.section_heads_up) }
+        item {
+            SectionHeading(Icons.Default.Settings, R.string.section_heads_up, headsUpExpanded) {
+                headsUpExpanded = !headsUpExpanded
+            }
+        }
+        if (headsUpExpanded) {
         item {
             SettingsCard {
                 PreferenceSwitchRow(
@@ -416,8 +439,14 @@ fun SettingsScreen() {
                 }
             }
         }
+        }
 
-        item { SectionHeading(Icons.Default.Refresh, R.string.section_actions) }
+        item {
+            SectionHeading(Icons.Default.Refresh, R.string.section_actions, actionsExpanded) {
+                actionsExpanded = !actionsExpanded
+            }
+        }
+        if (actionsExpanded) {
         item {
             SettingsCard {
                 Column(modifier = Modifier.padding(20.dp)) {
@@ -454,8 +483,14 @@ fun SettingsScreen() {
                 }
             }
         }
+        }
 
-        item { SectionHeading(Icons.Default.Build, R.string.section_diagnostics) }
+        item {
+            SectionHeading(Icons.Default.Build, R.string.section_diagnostics, diagnosticsExpanded) {
+                diagnosticsExpanded = !diagnosticsExpanded
+            }
+        }
+        if (diagnosticsExpanded) {
         item {
             SettingsCard {
                 Column {
@@ -540,8 +575,14 @@ fun SettingsScreen() {
                 }
             }
         }
+        }
 
-        item { SectionHeading(Icons.Default.Info, R.string.section_about) }
+        item {
+            SectionHeading(Icons.Default.Info, R.string.section_about, aboutExpanded) {
+                aboutExpanded = !aboutExpanded
+            }
+        }
+        if (aboutExpanded) {
         item {
             SettingsCard {
                 Column(modifier = Modifier.padding(vertical = 6.dp)) {
@@ -549,18 +590,23 @@ fun SettingsScreen() {
                         title = stringResource(R.string.app_name),
                         value = stringResource(R.string.version_value, BuildConfig.VERSION_NAME)
                     )
-                    AboutRow(
-                        title = stringResource(R.string.compatibility_value),
-                        value = stringResource(R.string.settings_language_auto)
+                    AboutLinkRow(
+                        title = stringResource(R.string.original_project_title),
+                        value = stringResource(R.string.original_project_author),
+                        url = stringResource(R.string.original_project_url),
+                        context = ctx
                     )
-                    Text(
-                        text = stringResource(R.string.about_language),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 14.dp)
+                    AboutRow(
+                        title = stringResource(R.string.license_title),
+                        value = stringResource(R.string.license_summary)
+                    )
+                    AboutRow(
+                        title = stringResource(R.string.contributors_title),
+                        value = stringResource(R.string.contributors_value)
                     )
                 }
             }
+        }
         }
         }
         }
@@ -774,27 +820,23 @@ private fun HeaderCard() {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.82f)
                 )
-                Spacer(modifier = Modifier.height(10.dp))
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
-                ) {
-                    Text(
-                        text = stringResource(R.string.settings_language_auto),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                    )
-                }
             }
         }
     }
 }
 
 @Composable
-private fun SectionHeading(icon: ImageVector, titleRes: Int) {
+private fun SectionHeading(
+    icon: ImageVector,
+    titleRes: Int,
+    expanded: Boolean,
+    onClick: () -> Unit
+) {
     Row(
-        modifier = Modifier.padding(start = 4.dp, top = 6.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
@@ -809,6 +851,17 @@ private fun SectionHeading(icon: ImageVector, titleRes: Int) {
             style = MaterialTheme.typography.titleSmall,
             color = MaterialTheme.colorScheme.primary,
             fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = stringResource(
+                if (expanded) R.string.collapse_section else R.string.expand_section
+            ),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .size(20.dp)
+                .rotate(if (expanded) -90f else 90f)
         )
     }
 }
@@ -1025,6 +1078,34 @@ private fun AboutRow(title: String, value: String) {
             text = value,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun AboutLinkRow(title: String, value: String, url: String, context: Context) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                } catch (_: Throwable) {
+                    Toast.makeText(context, R.string.link_open_failed, Toast.LENGTH_SHORT).show()
+                }
+            }
+            .padding(horizontal = 20.dp, vertical = 10.dp)
+    ) {
+        Text(title, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = url,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary
         )
     }
 }

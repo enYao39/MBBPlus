@@ -1,0 +1,12 @@
+MoreBubbleButton fork licensing and attribution
+
+This modified fork is distributed under GNU General Public License version 3.0 only.
+See LICENSE for the full license text.
+
+The project is derived from MoreBubbleButton by TYOPXN360:
+https://github.com/TYOPXN360/MoreBubbleButton
+
+The upstream repository identifies its license as Apache License 2.0. The Apache 2.0
+license text is included in LICENSE-APACHE-2.0. Upstream copyright notices and
+attribution remain applicable to the portions derived from that project. This fork's
+modifications and combined distribution are licensed under GPL-3.0-only.
