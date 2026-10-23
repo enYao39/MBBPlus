@@ -54,6 +54,8 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final Set<String> sActivityIntentDiagnosticPackages = ConcurrentHashMap.newKeySet();
     private static final Map<String, Long> sActivityDiagnosticHookTimes = new ConcurrentHashMap<>();
     private static final Map<String, Long> sBubbleTaskDiagnosticPackages = new ConcurrentHashMap<>();
+    private static final Map<Object, String> sBubbleTaskViewDiagnosticKeys =
+            java.util.Collections.synchronizedMap(new WeakHashMap<>());
     private static final long BUBBLE_TASK_DIAGNOSTIC_WINDOW_MS = 15000L;
     private static final String REDDIT_PACKAGE = "com.reddit.frontpage";
     private static final Map<String, LunarisRedditOverflowLaunch> sLunarisRedditOverflowLaunches =
@@ -900,8 +902,10 @@ public class MoreBubbleHookModule extends XposedModule {
                     + t.getClass().getSimpleName());
         }
 
-        // BubbleTaskViewHelper's TaskView.Listener callback carries the taskId and its
-        // enclosing helper carries the exact Bubble key. Hook that join point when present.
+        // AOSP builds with BubbleTaskViewHelper carry taskId in its nested listener. Newer
+        // Lunaris builds use BubbleTaskViewListener plus BubbleTaskView's delegate listener.
+        // Hook both shapes: the task-created callback is the point where the notification
+        // PendingIntent can safely be delivered into the Bubble TaskView.
         try {
             Class<?> helperClass = cl.loadClass(
                     "com.android.wm.shell.bubbles.BubbleTaskViewHelper");
@@ -944,12 +948,272 @@ public class MoreBubbleHookModule extends XposedModule {
                 }
             }
         } catch (Throwable t) {
-            Log.w(TAG, "Bubble TaskView helper diagnostics unavailable: "
-                    + t.getClass().getSimpleName());
+            if (isDebugLoggingEnabledForSystemUi(cl)) {
+                Log.i(TAG, "Legacy BubbleTaskViewHelper listener unavailable error="
+                        + t.getClass().getSimpleName());
+            }
         }
 
+        int taskViewListenerHooks = 0;
+        taskViewListenerHooks += hookBubbleTaskViewCallbacks(cl,
+                "com.android.wm.shell.bubbles.BubbleTaskViewListener");
+        taskViewListenerHooks += hookBubbleTaskViewCallbacks(cl,
+                "com.android.wm.shell.bubbles.BubbleTaskView$listener$1");
+        int taskViewStartHooks = hookBubbleTaskViewStartActivity(cl);
+
         Log.i(TAG, "Bubble task diagnostics hooks organizer=" + organizerHooks
-                + " helperListener=" + bubbleListenerHooks);
+                + " helperListener=" + bubbleListenerHooks
+                + " taskViewListener=" + taskViewListenerHooks
+                + " taskViewStart=" + taskViewStartHooks);
+    }
+
+    /** Hook the newer BubbleTaskView listener API used by Lunaris AOSP 3.12. */
+    private int hookBubbleTaskViewCallbacks(ClassLoader classLoader, String className) {
+        int installed = 0;
+        try {
+            Class<?> listenerClass = classLoader.loadClass(className);
+            for (Method method : listenerClass.getDeclaredMethods()) {
+                String name = method.getName();
+                Class<?>[] parameters = method.getParameterTypes();
+                boolean created = "onTaskCreated".equals(name) && parameters.length >= 1
+                        && parameters[0] == int.class;
+                boolean removed = "onTaskRemovalStarted".equals(name)
+                        && parameters.length >= 1 && parameters[0] == int.class;
+                boolean visibility = "onTaskVisibilityChanged".equals(name)
+                        && parameters.length >= 2 && parameters[0] == int.class
+                        && parameters[1] == boolean.class;
+                boolean initialized = "onInitialized".equals(name) && parameters.length == 0;
+                boolean released = "onReleased".equals(name) && parameters.length == 0;
+                boolean bubbleUpdated = "setBubble".equals(name) && parameters.length == 1;
+                if (!created && !removed && !visibility && !initialized && !released
+                        && !bubbleUpdated) continue;
+                method.setAccessible(true);
+                hook(method).intercept(chain -> {
+                    Object listener = chain.getThisObject();
+                    String bubbleKey = resolveBubbleTaskViewKey(listener);
+                    String packageName = packageFromBubbleKey(bubbleKey);
+                    if (bubbleUpdated) {
+                        Object updatedBubble = chain.getArg(0);
+                        if (packageName == null) packageName = getBubblePackageName(updatedBubble);
+                        if (bubbleKey == null) {
+                            Object updatedKey = invokeSystemUi(updatedBubble, "getKey");
+                            if (updatedKey instanceof String) bubbleKey = (String) updatedKey;
+                        }
+                    }
+                    boolean diagnosticWindow = isBubbleTaskDiagnosticActive(packageName);
+                    boolean pendingRedditLaunch = bubbleKey != null
+                            && sLunarisRedditOverflowLaunches.containsKey(bubbleKey);
+                    if (!diagnosticWindow && !pendingRedditLaunch) return chain.proceed();
+                    Context context = resolveBubbleTaskViewContext(listener);
+                    int taskId = parameters.length > 0 && chain.getArg(0) instanceof Number
+                            ? ((Number) chain.getArg(0)).intValue() : -1;
+                    ComponentName activity = created && parameters.length > 1
+                            && chain.getArg(1) instanceof ComponentName
+                            ? (ComponentName) chain.getArg(1) : null;
+                    boolean trace = diagnosticWindow && isDebugLoggingEnabled(context);
+                    Object taskView = trace ? resolveBubbleTaskView(listener) : null;
+                    if (trace && taskView != null && bubbleKey != null) {
+                        sBubbleTaskViewDiagnosticKeys.put(taskView, bubbleKey);
+                    }
+                    if (trace) {
+                        logDetailedInfo(context, "Bubble TaskView listener event=" + name
+                                + " api=" + className + " package=" + packageName
+                                + " bubbleKey=" + bubbleKey + " taskId=" + taskId
+                                + (bubbleUpdated ? " updatedPackage="
+                                + getBubblePackageName(chain.getArg(0)) : "")
+                                + " activity=" + flattenComponent(activity)
+                                + " taskView=" + describeBubbleTaskView(listener));
+                    }
+                    Object result;
+                    try {
+                        result = chain.proceed();
+                    } catch (Throwable t) {
+                        if (trace) {
+                            logDetailedInfo(context, "Bubble TaskView listener event failed="
+                                    + name + " api=" + className + " bubbleKey=" + bubbleKey
+                                    + " taskId=" + taskId + " error="
+                                    + t.getClass().getSimpleName());
+                        }
+                        throw t;
+                    }
+                    if (bubbleUpdated && trace) {
+                        String updatedKey = resolveBubbleTaskViewKey(listener);
+                        logDetailedInfo(context, "Bubble TaskView listener bubble set"
+                                + " api=" + className + " package="
+                                + getBubblePackageName(chain.getArg(0))
+                                + " bubbleKey=" + updatedKey
+                                + " taskView=" + describeBubbleTaskView(listener));
+                    }
+                    if (created) {
+                        completeLunarisRedditOverflowLaunch(listener, bubbleKey, taskId, context);
+                    }
+                    return result;
+                });
+                installed++;
+            }
+        } catch (Throwable t) {
+            // This API is ROM-specific; absence is expected on builds using the legacy helper.
+            if (isDebugLoggingEnabledForSystemUi(classLoader)) {
+                Log.i(TAG, "Bubble TaskView listener API unavailable class=" + className
+                        + " error=" + t.getClass().getSimpleName());
+            }
+        }
+        return installed;
+    }
+
+    private static String describeBubbleTaskView(Object listener) {
+        Object taskView = resolveBubbleTaskView(listener);
+        if (taskView == null) return "unavailable";
+        Object created = invokeSystemUi(taskView, "isCreated");
+        Object taskId = invokeSystemUi(taskView, "getTaskId");
+        Object displayId = invokeSystemUi(taskView, "getDisplayId");
+        return "class=" + taskView.getClass().getName() + ",created=" + created
+                + ",taskId=" + taskId + ",displayId=" + displayId;
+    }
+
+    private static Object resolveBubbleTaskView(Object listener) {
+        Object owner = getFieldSystemUi(listener, "this$0");
+        Object taskView = asShellTaskView(listener, 0);
+        if (taskView == null) taskView = asShellTaskView(owner, 0);
+        if (taskView == null) {
+            Object bubbleTaskView = getFieldSystemUi(listener, "mBubbleTaskView");
+            if (bubbleTaskView == null) bubbleTaskView = getFieldSystemUi(owner, "mBubbleTaskView");
+            if (bubbleTaskView == null) bubbleTaskView = getFieldSystemUi(listener, "bubbleTaskView");
+            taskView = asShellTaskView(bubbleTaskView, 0);
+        }
+        return taskView;
+    }
+
+    private static Object asShellTaskView(Object candidate, int depth) {
+        if (candidate == null || depth > 3) return null;
+        for (Class<?> type = candidate.getClass(); type != null; type = type.getSuperclass()) {
+            if ("com.android.wm.shell.taskview.TaskView".equals(type.getName())) return candidate;
+        }
+        Object nested = getFieldSystemUi(candidate, "mTaskView");
+        if (nested == null) nested = invokeSystemUi(candidate, "getTaskView");
+        if (nested == candidate) return null;
+        return asShellTaskView(nested, depth + 1);
+    }
+
+    /** Observe whether SystemUI actually asks a Bubble TaskView to start its PendingIntent. */
+    private int hookBubbleTaskViewStartActivity(ClassLoader classLoader) {
+        int installed = 0;
+        try {
+            Class<?> taskViewClass = classLoader.loadClass(
+                    "com.android.wm.shell.taskview.TaskView");
+            for (Method method : taskViewClass.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if (!"startActivity".equals(method.getName()) || parameters.length != 4
+                        || !PendingIntent.class.isAssignableFrom(parameters[0])
+                        || !Intent.class.isAssignableFrom(parameters[1])
+                        || !ActivityOptions.class.isAssignableFrom(parameters[2])
+                        || !Rect.class.isAssignableFrom(parameters[3])) continue;
+                method.setAccessible(true);
+                hook(method).intercept(chain -> {
+                    Object taskView = chain.getThisObject();
+                    String bubbleKey = sBubbleTaskViewDiagnosticKeys.get(taskView);
+                    String packageName = packageFromBubbleKey(bubbleKey);
+                    if (!isBubbleTaskDiagnosticActive(packageName)) return chain.proceed();
+                    Context context = invokeSystemUi(taskView, "getContext") instanceof Context
+                            ? (Context) invokeSystemUi(taskView, "getContext") : null;
+                    PendingIntent pendingIntent = chain.getArg(0) instanceof PendingIntent
+                            ? (PendingIntent) chain.getArg(0) : null;
+                    Intent fillInIntent = chain.getArg(1) instanceof Intent
+                            ? (Intent) chain.getArg(1) : null;
+                    boolean trace = isDebugLoggingEnabled(context);
+                    if (trace) {
+                        logDetailedInfo(context, "Bubble TaskView startActivity requested"
+                                + " package=" + packageName + " bubbleKey=" + bubbleKey
+                                + " pendingIntentCreator=" + (pendingIntent == null ? "unknown"
+                                : safePendingIntentCreator(pendingIntent))
+                                + " fillInAction=" + (fillInIntent == null ? "none"
+                                : fillInIntent.getAction())
+                                + " fillInComponent=" + (fillInIntent == null ? "none"
+                                : flattenComponent(fillInIntent.getComponent()))
+                                + " fillInHasData=" + (fillInIntent != null
+                                && fillInIntent.getData() != null));
+                    }
+                    try {
+                        Object result = chain.proceed();
+                        if (trace) {
+                            logDetailedInfo(context, "Bubble TaskView startActivity returned"
+                                    + " package=" + packageName + " bubbleKey=" + bubbleKey);
+                        }
+                        return result;
+                    } catch (Throwable t) {
+                        if (trace) {
+                            logDetailedInfo(context, "Bubble TaskView startActivity failed"
+                                    + " package=" + packageName + " bubbleKey=" + bubbleKey
+                                    + " error=" + t.getClass().getSimpleName());
+                        }
+                        throw t;
+                    }
+                });
+                installed++;
+            }
+        } catch (Throwable t) {
+            if (isDebugLoggingEnabledForSystemUi(classLoader)) {
+                Log.i(TAG, "Bubble TaskView startActivity diagnostics unavailable error="
+                        + t.getClass().getSimpleName());
+            }
+        }
+        return installed;
+    }
+
+    private static String resolveBubbleTaskViewKey(Object listener) {
+        Object key = invokeSystemUi(listener, "getBubbleKey");
+        if (key instanceof String) return (String) key;
+        Object owner = getFieldSystemUi(listener, "this$0");
+        if (owner != null) {
+            key = invokeSystemUi(owner, "getBubbleKey");
+            if (key instanceof String) return (String) key;
+            Object delegate = getFieldSystemUi(owner, "mDelegateListener");
+            key = invokeSystemUi(delegate, "getBubbleKey");
+            if (key instanceof String) return (String) key;
+        }
+        Object bubble = getFieldSystemUi(listener, "mBubble");
+        if (bubble == null) bubble = getFieldSystemUi(owner, "mBubble");
+        key = bubble != null ? invokeSystemUi(bubble, "getKey") : null;
+        if (key instanceof String) return (String) key;
+        Object bubbleTaskView = getFieldSystemUi(listener, "mBubbleTaskView");
+        if (bubbleTaskView == null) bubbleTaskView = getFieldSystemUi(owner, "mBubbleTaskView");
+        key = invokeSystemUi(bubbleTaskView, "getBubbleKey");
+        return key instanceof String ? (String) key : null;
+    }
+
+    private static Context resolveBubbleTaskViewContext(Object listener) {
+        Object context = getFieldSystemUi(listener, "mContext");
+        Object owner = getFieldSystemUi(listener, "this$0");
+        if (!(context instanceof Context) && owner != null) {
+            context = getFieldSystemUi(owner, "mContext");
+            if (!(context instanceof Context)) context = invokeSystemUi(owner, "getContext");
+        }
+        if (!(context instanceof Context)) {
+            Object bubbleTaskView = getFieldSystemUi(listener, "mBubbleTaskView");
+            if (bubbleTaskView == null) bubbleTaskView = getFieldSystemUi(owner, "mBubbleTaskView");
+            context = invokeSystemUi(bubbleTaskView, "getContext");
+        }
+        return context instanceof Context ? (Context) context : null;
+    }
+
+    private static String packageFromBubbleKey(String bubbleKey) {
+        if (bubbleKey == null) return null;
+        int separator = bubbleKey.lastIndexOf(':');
+        return separator >= 0 && separator + 1 < bubbleKey.length()
+                ? bubbleKey.substring(separator + 1) : null;
+    }
+
+    private static boolean isDebugLoggingEnabledForSystemUi(ClassLoader classLoader) {
+        try {
+            Class<?> application = classLoader.loadClass("android.app.ActivityThread");
+            Method currentApplicationMethod = application.getDeclaredMethod("currentApplication");
+            currentApplicationMethod.setAccessible(true);
+            Object currentApplication = currentApplicationMethod.invoke(null);
+            return currentApplication instanceof Context
+                    && isDebugLoggingEnabled((Context) currentApplication);
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private static void logBubbleOrganizerTaskEvent(Context context, Object organizer,
@@ -3339,14 +3603,26 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static void completeLunarisRedditOverflowLaunch(Object helper, String bubbleKey,
             int taskId, Context context) {
+        if (bubbleKey == null) bubbleKey = resolveBubbleTaskViewKey(helper);
+        if (bubbleKey == null) return;
         LunarisRedditOverflowLaunch pending = sLunarisRedditOverflowLaunches.get(bubbleKey);
         if (pending == null || !REDDIT_PACKAGE.equals(pending.packageName)
                 || SystemClock.elapsedRealtime() - pending.createdAt > 8000L
                 || !isLunarisRedditOverflowPatchEnabled(context, pending.packageName)) return;
         Object bubble = getFieldSystemUi(helper, "mBubble");
-        if (!pending.packageName.equals(getBubblePackageName(bubble))) return;
-        Object taskView = invokeSystemUi(helper, "getTaskView");
-        if (taskView == null) taskView = getFieldSystemUi(helper, "mTaskView");
+        if (bubble == null) {
+            Object owner = getFieldSystemUi(helper, "this$0");
+            bubble = getFieldSystemUi(owner, "mBubble");
+            if (bubble == null) {
+                Object bubbleTaskView = getFieldSystemUi(helper, "mBubbleTaskView");
+                if (bubbleTaskView == null) bubbleTaskView = getFieldSystemUi(owner, "mBubbleTaskView");
+                bubble = getFieldSystemUi(bubbleTaskView, "mBubble");
+            }
+        }
+        String resolvedPackage = getBubblePackageName(bubble);
+        if (resolvedPackage == null) resolvedPackage = packageFromBubbleKey(bubbleKey);
+        if (!pending.packageName.equals(resolvedPackage)) return;
+        Object taskView = resolveBubbleTaskView(helper);
         if (taskView == null) {
             if (isDebugLoggingEnabled(context)) {
                 logDetailedInfo(context, "Lunaris Reddit Bubble TaskView callback has no TaskView"
