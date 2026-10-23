@@ -10,12 +10,16 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -109,7 +113,6 @@ fun SettingsScreen() {
     var headsUpExpanded by remember { mutableStateOf(false) }
     var actionsExpanded by remember { mutableStateOf(false) }
     var diagnosticsExpanded by remember { mutableStateOf(false) }
-    var aboutExpanded by remember { mutableStateOf(false) }
     var systemUiBubbleEnabled by remember { mutableStateOf(ModuleSettings.isSystemUiBubbleEnabled(ctx)) }
     var openMode by remember { mutableIntStateOf(ModuleSettings.getOpenMode(ctx)) }
     var swipeHandleEnabled by remember { mutableStateOf(ModuleSettings.isSwipeHandleEnabled(ctx)) }
@@ -271,13 +274,12 @@ fun SettingsScreen() {
         item { HeaderCard() }
 
         item {
-            SectionHeading(Icons.Default.Build, R.string.section_recents, recentsExpanded) {
-                recentsExpanded = !recentsExpanded
-            }
-        }
-        if (recentsExpanded) {
-        item {
-            SettingsCard {
+            ExpandableSettingsCard(
+                title = stringResource(R.string.section_recents),
+                summary = stringResource(R.string.section_recents_summary),
+                expanded = recentsExpanded,
+                onClick = { recentsExpanded = !recentsExpanded }
+            ) {
                 PreferenceSwitchRow(
                     icon = Icons.Default.Build,
                     title = stringResource(R.string.feature_menu_title),
@@ -310,15 +312,14 @@ fun SettingsScreen() {
                 }
             }
         }
-        }
 
         item {
-            SectionHeading(Icons.Default.Notifications, R.string.section_notifications,
-                notificationsExpanded) { notificationsExpanded = !notificationsExpanded }
-        }
-        if (notificationsExpanded) {
-        item {
-            SettingsCard {
+            ExpandableSettingsCard(
+                title = stringResource(R.string.section_notifications),
+                summary = stringResource(R.string.section_notifications_summary),
+                expanded = notificationsExpanded,
+                onClick = { notificationsExpanded = !notificationsExpanded }
+            ) {
                 PreferenceSwitchRow(
                     icon = Icons.Default.Notifications,
                     title = stringResource(R.string.feature_system_ui_title),
@@ -345,16 +346,14 @@ fun SettingsScreen() {
                 )
             }
         }
-        }
 
         item {
-            SectionHeading(Icons.Default.Settings, R.string.section_heads_up, headsUpExpanded) {
-                headsUpExpanded = !headsUpExpanded
-            }
-        }
-        if (headsUpExpanded) {
-        item {
-            SettingsCard {
+            ExpandableSettingsCard(
+                title = stringResource(R.string.section_heads_up),
+                summary = stringResource(R.string.section_heads_up_summary),
+                expanded = headsUpExpanded,
+                onClick = { headsUpExpanded = !headsUpExpanded }
+            ) {
                 PreferenceSwitchRow(
                     icon = Icons.Default.Notifications,
                     title = stringResource(R.string.feature_swipe_handle_title),
@@ -439,16 +438,14 @@ fun SettingsScreen() {
                 }
             }
         }
-        }
 
         item {
-            SectionHeading(Icons.Default.Refresh, R.string.section_actions, actionsExpanded) {
-                actionsExpanded = !actionsExpanded
-            }
-        }
-        if (actionsExpanded) {
-        item {
-            SettingsCard {
+            ExpandableSettingsCard(
+                title = stringResource(R.string.section_actions),
+                summary = stringResource(R.string.section_actions_summary),
+                expanded = actionsExpanded,
+                onClick = { actionsExpanded = !actionsExpanded }
+            ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(
                         text = stringResource(R.string.restart_title),
@@ -483,16 +480,14 @@ fun SettingsScreen() {
                 }
             }
         }
-        }
 
         item {
-            SectionHeading(Icons.Default.Build, R.string.section_diagnostics, diagnosticsExpanded) {
-                diagnosticsExpanded = !diagnosticsExpanded
-            }
-        }
-        if (diagnosticsExpanded) {
-        item {
-            SettingsCard {
+            ExpandableSettingsCard(
+                title = stringResource(R.string.section_diagnostics),
+                summary = stringResource(R.string.section_diagnostics_summary),
+                expanded = diagnosticsExpanded,
+                onClick = { diagnosticsExpanded = !diagnosticsExpanded }
+            ) {
                 Column {
                     PreferenceSwitchRow(
                         icon = Icons.Default.Build,
@@ -575,17 +570,17 @@ fun SettingsScreen() {
                 }
             }
         }
-        }
 
         item {
-            SectionHeading(Icons.Default.Info, R.string.section_about, aboutExpanded) {
-                aboutExpanded = !aboutExpanded
-            }
-        }
-        if (aboutExpanded) {
-        item {
             SettingsCard {
-                Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                Column {
+                    Text(
+                        text = stringResource(R.string.section_about),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
                     AboutRow(
                         title = stringResource(R.string.app_name),
                         value = stringResource(R.string.version_value, BuildConfig.VERSION_NAME)
@@ -606,7 +601,6 @@ fun SettingsScreen() {
                     )
                 }
             }
-        }
         }
         }
         }
@@ -826,43 +820,62 @@ private fun HeaderCard() {
 }
 
 @Composable
-private fun SectionHeading(
-    icon: ImageVector,
-    titleRes: Int,
+private fun ExpandableSettingsCard(
+    title: String,
+    summary: String,
     expanded: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(20.dp)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = stringResource(titleRes),
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(modifier = Modifier.weight(1f))
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = stringResource(
-                if (expanded) R.string.collapse_section else R.string.expand_section
-            ),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (expanded) -90f else 90f,
+        animationSpec = tween(durationMillis = 220),
+        label = "settings_section_arrow"
+    )
+
+    SettingsCard {
+        Row(
             modifier = Modifier
-                .size(20.dp)
-                .rotate(if (expanded) -90f else 90f)
-        )
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(horizontal = 20.dp, vertical = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = summary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = stringResource(
+                    if (expanded) R.string.collapse_section else R.string.expand_section
+                ),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(24.dp)
+                    .rotate(arrowRotation)
+            )
+        }
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(animationSpec = tween(240)) + fadeIn(tween(180)),
+            exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(tween(150))
+        ) {
+            Column {
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 20.dp))
+                content()
+            }
+        }
     }
 }
 

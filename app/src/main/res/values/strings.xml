@@ -5,11 +5,16 @@
     <string name="module_description">Add Bubble and Freeform actions to Recents and notifications.</string>
     <string name="settings_subtitle">Open apps as a Bubble or in Freeform.</string>
     <string name="section_recents">Recents</string>
+    <string name="section_recents_summary">Task card menu and bottom actions.</string>
     <string name="section_notifications">Notifications</string>
+    <string name="section_notifications_summary">Bubble button and launch mode.</string>
     <string name="section_heads_up">Heads-up popup</string>
+    <string name="section_heads_up_summary">Swipe handle and its size.</string>
     <string name="section_position">Button position</string>
     <string name="section_actions">Actions</string>
+    <string name="section_actions_summary">Apply changes to Launcher and System UI.</string>
     <string name="section_diagnostics">Diagnostics</string>
+    <string name="section_diagnostics_summary">Detailed logs and notification tests.</string>
     <string name="section_about">About</string>
     <string name="feature_menu_title">Task card menu</string>
     <string name="feature_menu_summary">Add Bubble to the task card menu.</string>

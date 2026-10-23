@@ -5,11 +5,16 @@
     <string name="module_description">在最近任务和通知中添加 Bubble 与自由窗口操作。</string>
     <string name="settings_subtitle">将应用打开为 Bubble 或自由窗口。</string>
     <string name="section_recents">最近任务</string>
+    <string name="section_recents_summary">任务卡片菜单和最近任务底部操作。</string>
     <string name="section_notifications">通知</string>
+    <string name="section_notifications_summary">通知 Bubble 按钮和打开方式。</string>
     <string name="section_heads_up">Heads-up 弹出通知</string>
+    <string name="section_heads_up_summary">下滑横条及其尺寸。</string>
     <string name="section_position">按钮位置</string>
     <string name="section_actions">操作</string>
+    <string name="section_actions_summary">应用启动器和系统界面更改。</string>
     <string name="section_diagnostics">诊断日志</string>
+    <string name="section_diagnostics_summary">详细日志和通知测试。</string>
     <string name="section_about">关于</string>
     <string name="feature_menu_title">任务卡片菜单</string>
     <string name="feature_menu_summary">在任务卡片菜单中添加 Bubble。</string>
