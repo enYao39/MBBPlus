@@ -1,7 +1,9 @@
 package com.floatwindow.morebubblebutton.ui
 
 import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -112,6 +114,7 @@ fun SettingsScreen() {
     var notificationsExpanded by remember { mutableStateOf(false) }
     var headsUpExpanded by remember { mutableStateOf(false) }
     var actionsExpanded by remember { mutableStateOf(false) }
+    var launcherHidden by remember { mutableStateOf(isLauncherIconHidden(ctx)) }
     var diagnosticsExpanded by remember { mutableStateOf(false) }
     var systemUiBubbleEnabled by remember { mutableStateOf(ModuleSettings.isSystemUiBubbleEnabled(ctx)) }
     var openMode by remember { mutableIntStateOf(ModuleSettings.getOpenMode(ctx)) }
@@ -477,6 +480,34 @@ fun SettingsScreen() {
                         Spacer(Modifier.width(8.dp))
                         Text(stringResource(R.string.restart_button))
                     }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    PreferenceSwitchRow(
+                        icon = Icons.Default.Settings,
+                        title = stringResource(R.string.hide_launcher_title),
+                        summary = stringResource(R.string.hide_launcher_summary),
+                        checked = launcherHidden,
+                        onCheckedChange = { hide ->
+                            try {
+                                val launcherComponent = ComponentName(
+                                    ctx,
+                                    "${ctx.packageName}.LauncherActivity"
+                                )
+                                ctx.packageManager.setComponentEnabledSetting(
+                                    launcherComponent,
+                                    if (hide) PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                                    else PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+                                    PackageManager.DONT_KILL_APP
+                                )
+                                launcherHidden = hide
+                            } catch (_: Throwable) {
+                                Toast.makeText(
+                                    ctx,
+                                    R.string.hide_launcher_failed,
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    )
                 }
             }
         }
@@ -605,6 +636,12 @@ fun SettingsScreen() {
         }
         }
     }
+}
+
+private fun isLauncherIconHidden(context: Context): Boolean {
+    val launcherComponent = ComponentName(context, "${context.packageName}.LauncherActivity")
+    return context.packageManager.getComponentEnabledSetting(launcherComponent) ==
+        PackageManager.COMPONENT_ENABLED_STATE_DISABLED
 }
 
 @Composable

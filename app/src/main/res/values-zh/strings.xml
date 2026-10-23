@@ -63,6 +63,9 @@
     <string name="restart_title">应用更改</string>
     <string name="restart_summary">重启启动器和系统界面以应用更改。</string>
     <string name="restart_button">重启启动器和系统界面</string>
+    <string name="hide_launcher_title">隐藏桌面图标</string>
+    <string name="hide_launcher_summary">隐藏桌面入口，LSPosed 中的模块设置入口仍可使用。</string>
+    <string name="hide_launcher_failed">无法更新桌面图标状态。</string>
     <string name="restart_success">已发送重启命令。</string>
     <string name="restart_failed">无法重启启动器和系统界面，请检查 root 权限。</string>
     <string name="debug_logging_title">详细调试日志</string>

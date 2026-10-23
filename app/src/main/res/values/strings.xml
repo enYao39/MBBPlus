@@ -63,6 +63,9 @@
     <string name="restart_title">Apply changes</string>
     <string name="restart_summary">Restart Launcher and System UI to apply changes.</string>
     <string name="restart_button">Restart launcher &amp; System UI</string>
+    <string name="hide_launcher_title">Hide launcher icon</string>
+    <string name="hide_launcher_summary">Remove the home-screen icon. LSPosed module settings remain available.</string>
+    <string name="hide_launcher_failed">Could not update the launcher icon.</string>
     <string name="restart_success">Restart command sent.</string>
     <string name="restart_failed">Could not restart Launcher/System UI. Check root permission.</string>
     <string name="debug_logging_title">Detailed debug logging</string>
