@@ -1230,6 +1230,14 @@ public class MoreBubbleHookModule extends XposedModule {
             if (!isBubbleTaskDiagnosticActive(packageName)) return;
             Object display = getFieldSystemUi(taskInfo, "displayId");
             Object user = getFieldSystemUi(taskInfo, "userId");
+            Object parentTaskId = getFieldSystemUi(taskInfo, "parentTaskId");
+            if (parentTaskId == null) {
+                parentTaskId = invokeSystemUi(taskInfo, "getParentTaskId");
+            }
+            Object isAppBubble = getFieldSystemUi(taskInfo, "isAppBubble");
+            if (isAppBubble == null) {
+                isAppBubble = invokeSystemUi(taskInfo, "isAppBubble");
+            }
             Object configuration = getFieldSystemUi(taskInfo, "configuration");
             Object windowConfiguration = configuration != null
                     ? invokeSystemUi(configuration, "getWindowConfiguration") : null;
@@ -1243,6 +1251,8 @@ public class MoreBubbleHookModule extends XposedModule {
             logDetailedInfo(context, "Bubble ShellTaskOrganizer task event=" + event
                     + " package=" + packageName + " taskId=" + taskId
                     + " userId=" + user + " displayId=" + display
+                    + " parentTaskId=" + (parentTaskId == null ? "unavailable" : parentTaskId)
+                    + " isAppBubble=" + (isAppBubble == null ? "unavailable" : isAppBubble)
                     + " windowingMode=" + windowingMode
                     + " top=" + flattenComponent(top) + " base=" + flattenComponent(base)
                     + " listener=" + (listener == null ? "none" : listener.getClass().getName())
