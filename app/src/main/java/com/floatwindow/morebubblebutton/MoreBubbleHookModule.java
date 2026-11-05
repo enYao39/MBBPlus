@@ -1100,26 +1100,30 @@ public class MoreBubbleHookModule extends XposedModule {
                 hook(method).intercept(chain -> {
                     Object taskView = chain.getThisObject();
                     String bubbleKey = sBubbleTaskViewDiagnosticKeys.get(taskView);
-                    String packageName = packageFromBubbleKey(bubbleKey);
-                    if (!isBubbleTaskDiagnosticActive(packageName)) return chain.proceed();
-                    Context context = invokeSystemUi(taskView, "getContext") instanceof Context
-                            ? (Context) invokeSystemUi(taskView, "getContext") : null;
                     PendingIntent pendingIntent = chain.getArg(0) instanceof PendingIntent
                             ? (PendingIntent) chain.getArg(0) : null;
+                    String creator = pendingIntent == null ? null
+                            : safePendingIntentCreator(pendingIntent);
+                    String packageName = packageFromBubbleKey(bubbleKey);
+                    if (packageName == null) packageName = creator;
+                    if (!isBubbleTaskDiagnosticActive(packageName)) return chain.proceed();
+                    Object viewContext = invokeSystemUi(taskView, "getContext");
+                    Context context = viewContext instanceof Context ? (Context) viewContext : null;
                     Intent fillInIntent = chain.getArg(1) instanceof Intent
                             ? (Intent) chain.getArg(1) : null;
                     boolean trace = isDebugLoggingEnabled(context);
                     if (trace) {
                         logDetailedInfo(context, "Bubble TaskView startActivity requested"
                                 + " package=" + packageName + " bubbleKey=" + bubbleKey
-                                + " pendingIntentCreator=" + (pendingIntent == null ? "unknown"
-                                : safePendingIntentCreator(pendingIntent))
+                                + " pendingIntentCreator=" + creator
                                 + " fillInAction=" + (fillInIntent == null ? "none"
                                 : fillInIntent.getAction())
                                 + " fillInComponent=" + (fillInIntent == null ? "none"
                                 : flattenComponent(fillInIntent.getComponent()))
                                 + " fillInHasData=" + (fillInIntent != null
-                                && fillInIntent.getData() != null));
+                                && fillInIntent.getData() != null)
+                                + " " + describeBubbleLaunchOptions(
+                                (ActivityOptions) chain.getArg(2), classLoader));
                     }
                     try {
                         Object result = chain.proceed();
@@ -1146,6 +1150,47 @@ public class MoreBubbleHookModule extends XposedModule {
             }
         }
         return installed;
+    }
+
+    private static String describeBubbleLaunchOptions(ActivityOptions options,
+            ClassLoader classLoader) {
+        String flags = " rootTaskFeature=" + readBubbleRootTaskFeature(classLoader);
+        if (options == null) return " launchOptions=none" + flags;
+        try {
+            android.os.Bundle bundle = options.toBundle();
+            if (bundle == null) return " launchOptions=unavailable" + flags;
+            return " launchRootTaskTokenPresent="
+                    + (bundle.get("android.activity.launchRootTaskToken") != null)
+                    + " launchNextToBubble="
+                    + bundle.getBoolean("android.activity.launchNextToBubble")
+                    + " launchCookiePresent=" + (bundle.get("android.os.IBinder") != null
+                    || bundle.get("android.activity.launchCookie") != null)
+                    + flags;
+        } catch (Throwable t) {
+            return " launchOptions=unavailable:" + t.getClass().getSimpleName() + flags;
+        }
+    }
+
+    private static String readBubbleRootTaskFeature(ClassLoader classLoader) {
+        for (String helper : new String[]{"BubbleAnythingFlagHelper", "BubbleFlagHelper"}) {
+            try {
+                Class<?> type = classLoader.loadClass(
+                        "com.android.wm.shell.shared.bubbles." + helper);
+                Method method = findMethodSystemUi(type, "enableRootTaskForBubble");
+                if (method == null) continue;
+                Object receiver = null;
+                if (!java.lang.reflect.Modifier.isStatic(method.getModifiers())) {
+                    java.lang.reflect.Field instance = type.getDeclaredField("INSTANCE");
+                    instance.setAccessible(true);
+                    receiver = instance.get(null);
+                }
+                Object value = method.invoke(receiver);
+                if (value instanceof Boolean) return value.toString();
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError ignored) {
+                // ROMs expose different flag helpers.
+            }
+        }
+        return "unavailable";
     }
 
     private static String resolveBubbleTaskViewKey(Object listener) {
