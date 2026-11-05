@@ -953,11 +953,16 @@ public class MoreBubbleHookModule extends XposedModule {
         taskViewListenerHooks += hookBubbleTaskViewCallbacks(cl,
                 "com.android.wm.shell.bubbles.BubbleTaskView$listener$1");
         int taskViewStartHooks = hookBubbleTaskViewStartActivity(cl);
+        int transactionHooks = hookBubblePendingIntentOptions(cl,
+                "android.window.WindowContainerTransaction", "sendPendingIntent");
+        int directSendHooks = hookBubblePendingIntentOptions(cl,
+                "android.app.PendingIntent", "send");
 
         Log.i(TAG, "Bubble task diagnostics hooks organizer=" + organizerHooks
                 + " helperListener=" + bubbleListenerHooks
                 + " taskViewListener=" + taskViewListenerHooks
-                + " taskViewStart=" + taskViewStartHooks);
+                + " taskViewStart=" + taskViewStartHooks
+                + " transactionSend=" + transactionHooks + " directSend=" + directSendHooks);
     }
 
     /** Hook the newer BubbleTaskView listener API used by Lunaris AOSP 3.12. */
@@ -1152,23 +1157,76 @@ public class MoreBubbleHookModule extends XposedModule {
         return installed;
     }
 
+    /** Observe both transition requests and direct sends from the Shell process. */
+    private int hookBubblePendingIntentOptions(ClassLoader loader, String className,
+            String methodName) {
+        int installed = 0;
+        try {
+            Class<?> owner = loader.loadClass(className);
+            for (Method method : owner.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                int optionsIndex = java.util.Arrays.asList(parameters)
+                        .indexOf(android.os.Bundle.class);
+                if (!methodName.equals(method.getName()) || optionsIndex < 0) continue;
+                boolean direct = owner == PendingIntent.class;
+                if (!direct && parameters[0] != PendingIntent.class) continue;
+                method.setAccessible(true);
+                hook(method).intercept(chain -> {
+                    try {
+                        Object value = chain.getArg(optionsIndex);
+                        if (value instanceof android.os.Bundle options
+                                && (options.containsKey("android.activity.launchNextToBubble")
+                                || options.containsKey("android.activity.launchRootTaskToken")
+                                || options.containsKey("android.activity.launchCookie"))
+                                && isDebugLoggingEnabledForSystemUi(loader)) {
+                            java.util.List<String> activePackages = new java.util.ArrayList<>();
+                            for (String pkg : sBubbleTaskDiagnosticPackages.keySet()) {
+                                if (isBubbleTaskDiagnosticActive(pkg)) activePackages.add(pkg);
+                            }
+                            if (!activePackages.isEmpty()) {
+                                Object sender = direct ? chain.getThisObject() : chain.getArg(0);
+                                String creator = sender instanceof PendingIntent pending
+                                        ? safePendingIntentCreator(pending) : "unknown";
+                                Log.i(TAG, "Bubble Shell PendingIntent options"
+                                        + " entry=" + owner.getSimpleName() + "." + methodName
+                                        + " activePackages=" + activePackages
+                                        + " pendingIntentCreator=" + creator
+                                        + describeBubbleLaunchBundle(options, loader));
+                            }
+                        }
+                    } catch (RuntimeException | LinkageError ignored) {
+                        // A diagnostic failure must not interfere with the original launch.
+                    }
+                    return chain.proceed();
+                });
+                installed++;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Bubble Shell PendingIntent hook unavailable: " + className
+                    + " error=" + t.getClass().getSimpleName());
+        }
+        return installed;
+    }
+
     private static String describeBubbleLaunchOptions(ActivityOptions options,
             ClassLoader classLoader) {
-        String flags = " rootTaskFeature=" + readBubbleRootTaskFeature(classLoader);
-        if (options == null) return " launchOptions=none" + flags;
+        if (options == null) return " launchOptions=none";
         try {
-            android.os.Bundle bundle = options.toBundle();
-            if (bundle == null) return " launchOptions=unavailable" + flags;
-            return " launchRootTaskTokenPresent="
-                    + (bundle.get("android.activity.launchRootTaskToken") != null)
-                    + " launchNextToBubble="
-                    + bundle.getBoolean("android.activity.launchNextToBubble")
-                    + " launchCookiePresent=" + (bundle.get("android.os.IBinder") != null
-                    || bundle.get("android.activity.launchCookie") != null)
-                    + flags;
+            return describeBubbleLaunchBundle(options.toBundle(), classLoader);
         } catch (Throwable t) {
-            return " launchOptions=unavailable:" + t.getClass().getSimpleName() + flags;
+            return " launchOptions=unavailable:" + t.getClass().getSimpleName();
         }
+    }
+
+    private static String describeBubbleLaunchBundle(android.os.Bundle bundle,
+            ClassLoader loader) {
+        if (bundle == null) return " launchOptions=unavailable";
+        return " launchRootTaskTokenPresent="
+                + (bundle.get("android.activity.launchRootTaskToken") != null)
+                + " launchNextToBubble=" + bundle.getBoolean("android.activity.launchNextToBubble")
+                + " launchCookiePresent=" + (bundle.getBinder("android.activity.launchCookie") != null)
+                + " windowingMode=" + bundle.getInt("android.activity.windowingMode")
+                + " rootTaskFeature=" + readBubbleRootTaskFeature(loader);
     }
 
     private static String readBubbleRootTaskFeature(ClassLoader classLoader) {
