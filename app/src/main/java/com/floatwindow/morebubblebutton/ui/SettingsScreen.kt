@@ -33,10 +33,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -51,13 +53,16 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -65,6 +70,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -85,6 +91,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.floatwindow.morebubblebutton.BuildConfig
 import com.floatwindow.morebubblebutton.DebugLogExporter
 import com.floatwindow.morebubblebutton.ModuleSettings
@@ -115,6 +122,12 @@ fun SettingsScreen() {
     var headsUpExpanded by remember { mutableStateOf(false) }
     var actionsExpanded by remember { mutableStateOf(false) }
     var launcherHidden by remember { mutableStateOf(isLauncherIconHidden(ctx)) }
+    var bubbleCompatibilityPackages by remember {
+        mutableStateOf(ModuleSettings.getBubbleNotificationCompatibilityPackages(ctx))
+    }
+    var showBubbleCompatibilityDialog by remember { mutableStateOf(false) }
+    var bubbleCompatibilityApps by remember { mutableStateOf<List<LaunchableApp>>(emptyList()) }
+    var loadingBubbleCompatibilityApps by remember { mutableStateOf(false) }
     var diagnosticsExpanded by remember { mutableStateOf(false) }
     var systemUiBubbleEnabled by remember { mutableStateOf(ModuleSettings.isSystemUiBubbleEnabled(ctx)) }
     var openMode by remember { mutableIntStateOf(ModuleSettings.getOpenMode(ctx)) }
@@ -165,6 +178,13 @@ fun SettingsScreen() {
     LaunchedEffect(rootCheckKey) {
         rootAccess = null
         rootAccess = withContext(Dispatchers.IO) { hasRootAccess() }
+    }
+    LaunchedEffect(showBubbleCompatibilityDialog) {
+        if (showBubbleCompatibilityDialog) {
+            loadingBubbleCompatibilityApps = true
+            bubbleCompatibilityApps = withContext(Dispatchers.IO) { loadLaunchableApps(ctx) }
+            loadingBubbleCompatibilityApps = false
+        }
     }
     BackHandler(enabled = showActionBarSettings) {
         showActionBarSettings = false
@@ -508,6 +528,16 @@ fun SettingsScreen() {
                             }
                         }
                     )
+                    PreferenceDivider()
+                    PreferenceNavigationRow(
+                        icon = Icons.Default.Notifications,
+                        title = stringResource(R.string.bubble_compatibility_title),
+                        summary = stringResource(
+                            R.string.bubble_compatibility_summary,
+                            bubbleCompatibilityPackages.size
+                        ),
+                        onClick = { showBubbleCompatibilityDialog = true }
+                    )
                 }
             }
         }
@@ -636,6 +666,150 @@ fun SettingsScreen() {
         }
         }
     }
+
+    if (showBubbleCompatibilityDialog) {
+        BubbleCompatibilityAppPickerDialog(
+            apps = bubbleCompatibilityApps,
+            loading = loadingBubbleCompatibilityApps,
+            selectedPackages = bubbleCompatibilityPackages,
+            onDismiss = { showBubbleCompatibilityDialog = false },
+            onConfirm = { selected ->
+                bubbleCompatibilityPackages = selected
+                ModuleSettings.setBubbleNotificationCompatibilityPackages(ctx, selected)
+                showBubbleCompatibilityDialog = false
+            }
+        )
+    }
+}
+
+private data class LaunchableApp(val packageName: String, val label: String)
+
+private fun loadLaunchableApps(context: Context): List<LaunchableApp> {
+    val packageManager = context.packageManager
+    val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+    return try {
+        packageManager.queryIntentActivities(launcherIntent, 0)
+            .mapNotNull { resolveInfo ->
+                val activity = resolveInfo.activityInfo ?: return@mapNotNull null
+                val packageName = activity.packageName ?: return@mapNotNull null
+                if (packageName == context.packageName) return@mapNotNull null
+                val label = resolveInfo.loadLabel(packageManager)?.toString()
+                    ?.takeIf { it.isNotBlank() } ?: packageName
+                LaunchableApp(packageName, label)
+            }
+            .distinctBy { it.packageName }
+            .sortedWith(compareBy<LaunchableApp> { it.label.lowercase() }
+                .thenBy { it.packageName })
+    } catch (_: Throwable) {
+        emptyList()
+    }
+}
+
+@Composable
+private fun BubbleCompatibilityAppPickerDialog(
+    apps: List<LaunchableApp>,
+    loading: Boolean,
+    selectedPackages: Set<String>,
+    onDismiss: () -> Unit,
+    onConfirm: (Set<String>) -> Unit
+) {
+    var search by remember { mutableStateOf("") }
+    var selected by remember(selectedPackages) { mutableStateOf(selectedPackages.toSet()) }
+    val filteredApps = remember(apps, search) {
+        if (search.isBlank()) apps else apps.filter {
+            it.label.contains(search, ignoreCase = true)
+                    || it.packageName.contains(search, ignoreCase = true)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.bubble_compatibility_title)) },
+        text = {
+            Column {
+                Text(
+                    text = stringResource(R.string.bubble_compatibility_dialog_summary),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.bubble_compatibility_search)) }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                when {
+                    loading -> Text(
+                        text = stringResource(R.string.bubble_compatibility_loading),
+                        modifier = Modifier.padding(vertical = 16.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    filteredApps.isEmpty() -> Text(
+                        text = stringResource(
+                            if (apps.isEmpty()) R.string.bubble_compatibility_no_apps
+                            else R.string.bubble_compatibility_no_matches
+                        ),
+                        modifier = Modifier.padding(vertical = 16.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    else -> LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                        itemsIndexed(filteredApps, key = { _, app -> app.packageName }) { _, app ->
+                            val checked = app.packageName in selected
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selected = if (checked) selected - app.packageName
+                                        else selected + app.packageName
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AndroidView(
+                                    factory = { viewContext ->
+                                        android.widget.ImageView(viewContext).apply {
+                                            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                                            setImageDrawable(try {
+                                                viewContext.packageManager.getApplicationIcon(app.packageName)
+                                            } catch (_: Throwable) {
+                                                null
+                                            })
+                                        }
+                                    },
+                                    modifier = Modifier.size(40.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(app.label, style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        app.packageName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Checkbox(checked = checked, onCheckedChange = null)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(selected) }) {
+                Text(stringResource(R.string.done))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.cancel))
+            }
+        }
+    )
 }
 
 private fun isLauncherIconHidden(context: Context): Boolean {

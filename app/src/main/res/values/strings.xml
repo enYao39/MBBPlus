@@ -66,6 +66,15 @@
     <string name="hide_launcher_title">Hide launcher icon</string>
     <string name="hide_launcher_summary">Remove the home-screen icon. LSPosed module settings remain available.</string>
     <string name="hide_launcher_failed">Could not update the launcher icon.</string>
+    <string name="bubble_compatibility_title">Per-app Bubble compatibility</string>
+    <string name="bubble_compatibility_summary">Use the upstream notification Bubble route for selected apps in Bubble mode. Selected: %1$d</string>
+    <string name="bubble_compatibility_dialog_summary">Selected apps use the upstream-compatible notification launch path. This applies only when Open with is set to Bubble.</string>
+    <string name="bubble_compatibility_search">Search apps</string>
+    <string name="bubble_compatibility_loading">Loading apps…</string>
+    <string name="bubble_compatibility_no_apps">No launchable apps found.</string>
+    <string name="bubble_compatibility_no_matches">No apps match your search.</string>
+    <string name="done">Done</string>
+    <string name="cancel">Cancel</string>
     <string name="restart_success">Restart command sent.</string>
     <string name="restart_failed">Could not restart Launcher/System UI. Check root permission.</string>
     <string name="debug_logging_title">Detailed debug logging</string>

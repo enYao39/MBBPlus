@@ -6,7 +6,10 @@ import android.database.Cursor;
 import android.net.Uri;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 public class ModuleSettings {
     public static final String PREFS_NAME = "morebubblebutton_settings";
@@ -20,6 +23,8 @@ public class ModuleSettings {
     public static final String KEY_POS_Y = "pos_y"; // 0-100, 50=居中
     public static final String KEY_SYSTEMUI_BUBBLE_ENABLED = "systemui_bubble_enabled";
     public static final String KEY_OPEN_MODE = "open_mode"; // 0=Bubble 1=Freeform
+    public static final String KEY_BUBBLE_NOTIFICATION_COMPATIBILITY_PACKAGES =
+            "bubble_notification_compatibility_packages";
     public static final String KEY_POPUP_PRESENTATION = "popup_presentation"; // 0=按钮 1=下滑横条
     public static final String KEY_SWIPE_HANDLE_ENABLED = "swipe_handle_enabled";
     public static final String KEY_SWIPE_HANDLE_LENGTH = "swipe_handle_length_dp";
@@ -184,6 +189,44 @@ public class ModuleSettings {
     public static void setOpenMode(Context ctx, int value) {
         getPrefs(ctx).edit().putInt(KEY_OPEN_MODE,
                 value == OPEN_MODE_FREEFORM ? OPEN_MODE_FREEFORM : OPEN_MODE_BUBBLE).apply();
+    }
+
+    /** Packages that use the upstream BubbleController route for notification launches. */
+    public static Set<String> getBubbleNotificationCompatibilityPackages(Context ctx) {
+        Map<String, String> remote = getRemoteSettings(ctx);
+        String serialized = remote != null
+                ? remote.get(KEY_BUBBLE_NOTIFICATION_COMPATIBILITY_PACKAGES)
+                : null;
+        if (serialized == null) {
+            serialized = getPrefs(ctx).getString(
+                    KEY_BUBBLE_NOTIFICATION_COMPATIBILITY_PACKAGES, "");
+        }
+        Set<String> packages = new HashSet<>();
+        if (serialized == null || serialized.isEmpty()) return packages;
+        for (String value : serialized.split(",")) {
+            String packageName = value.trim();
+            if (!packageName.isEmpty()) packages.add(packageName);
+        }
+        return packages;
+    }
+
+    public static boolean isBubbleNotificationCompatibilityEnabled(Context ctx, String packageName) {
+        return packageName != null
+                && getBubbleNotificationCompatibilityPackages(ctx).contains(packageName);
+    }
+
+    public static void setBubbleNotificationCompatibilityPackages(Context ctx, Set<String> packages) {
+        TreeSet<String> sorted = new TreeSet<>();
+        if (packages != null) {
+            for (String packageName : packages) {
+                if (packageName != null && !packageName.trim().isEmpty()) {
+                    sorted.add(packageName.trim());
+                }
+            }
+        }
+        getPrefs(ctx).edit().putString(
+                KEY_BUBBLE_NOTIFICATION_COMPATIBILITY_PACKAGES,
+                String.join(",", sorted)).apply();
     }
 
     /** Heads-up 中显示原生 Bubble 按钮，或显示可下滑的横条。 */

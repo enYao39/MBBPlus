@@ -66,6 +66,15 @@
     <string name="hide_launcher_title">隐藏桌面图标</string>
     <string name="hide_launcher_summary">隐藏桌面入口，LSPosed 中的模块设置入口仍可使用。</string>
     <string name="hide_launcher_failed">无法更新桌面图标状态。</string>
+    <string name="bubble_compatibility_title">按应用设置 Bubble 兼容方式</string>
+    <string name="bubble_compatibility_summary">Bubble 模式下，所选应用使用上游通知启动路径。已选：%1$d</string>
+    <string name="bubble_compatibility_dialog_summary">所选应用使用上游兼容通知启动路径。仅当“打开方式”选择 Bubble 时生效。</string>
+    <string name="bubble_compatibility_search">搜索应用</string>
+    <string name="bubble_compatibility_loading">正在加载应用…</string>
+    <string name="bubble_compatibility_no_apps">没有找到可启动的应用。</string>
+    <string name="bubble_compatibility_no_matches">没有匹配的应用。</string>
+    <string name="done">完成</string>
+    <string name="cancel">取消</string>
     <string name="restart_success">已发送重启命令。</string>
     <string name="restart_failed">无法重启启动器和系统界面，请检查 root 权限。</string>
     <string name="debug_logging_title">详细调试日志</string>

@@ -41,6 +41,8 @@ public class SettingsProvider extends ContentProvider {
                                 == ModuleSettings.POPUP_PRESENTATION_SWIPE_HANDLE);
         add(cursor, ModuleSettings.KEY_OPEN_MODE,
                 prefs.getInt(ModuleSettings.KEY_OPEN_MODE, ModuleSettings.OPEN_MODE_BUBBLE));
+        add(cursor, ModuleSettings.KEY_BUBBLE_NOTIFICATION_COMPATIBILITY_PACKAGES,
+                prefs.getString(ModuleSettings.KEY_BUBBLE_NOTIFICATION_COMPATIBILITY_PACKAGES, ""));
         add(cursor, ModuleSettings.KEY_POPUP_PRESENTATION,
                 prefs.getInt(ModuleSettings.KEY_POPUP_PRESENTATION,
                         ModuleSettings.POPUP_PRESENTATION_BUBBLE_BUTTON));
@@ -66,6 +68,10 @@ public class SettingsProvider extends ContentProvider {
 
     private static void add(MatrixCursor cursor, String key, int value) {
         cursor.addRow(new Object[]{key, Integer.toString(value)});
+    }
+
+    private static void add(MatrixCursor cursor, String key, String value) {
+        cursor.addRow(new Object[]{key, value});
     }
 
     @Override
