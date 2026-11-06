@@ -57,6 +57,7 @@ public class MoreBubbleHookModule extends XposedModule {
             "com.reddit.auth.login.impl.AuthService";
     private static View sSecondRow;
     private static final Set<String> sActivityIntentDiagnosticPackages = ConcurrentHashMap.newKeySet();
+    private static final Set<String> sRedditDeepLinkDiagnosticPackages = ConcurrentHashMap.newKeySet();
     private static final Map<String, Long> sActivityDiagnosticHookTimes = new ConcurrentHashMap<>();
     private static final Map<String, Long> sBubbleTaskDiagnosticPackages = new ConcurrentHashMap<>();
     private static volatile boolean sBubbleTaskDiagnosticsHooksInstalled;
@@ -66,6 +67,8 @@ public class MoreBubbleHookModule extends XposedModule {
             java.util.Collections.synchronizedMap(new WeakHashMap<>());
     private static final long BUBBLE_TASK_DIAGNOSTIC_WINDOW_MS = 15000L;
     private static final ThreadLocal<OutgoingActivityLaunchTrace> sOutgoingActivityLaunchTrace =
+            new ThreadLocal<>();
+    private static final ThreadLocal<RedditDeepLinkRouteTrace> sRedditDeepLinkRouteTrace =
             new ThreadLocal<>();
     private final ThreadLocal<String> mTaskSelectionTrace = new ThreadLocal<>();
     private ClassLoader mLauncherClassLoader;
@@ -85,6 +88,18 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final String LUNARIS_SYSTEMUI_PACKAGE = "com.android.systemui";
     private static final String LUNARIS_FREEFORM_ICON =
             "desktop_mode_ic_handle_menu_floating";
+
+    private static final class RedditDeepLinkRouteTrace {
+        final String id;
+        boolean mainActivityLookupObserved;
+        String mainActivityCandidate = "unknown";
+        boolean screenPredicateObserved;
+        Boolean screenPredicateResult;
+
+        RedditDeepLinkRouteTrace(String id) {
+            this.id = id;
+        }
+    }
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -295,7 +310,123 @@ public class MoreBubbleHookModule extends XposedModule {
             // LSPosed only loads this module in packages enabled in its scope. Use the
             // same generic Activity observer for any user-selected target application.
             hookActivityIntentDiagnostics(param);
+            if ("com.reddit.frontpage".equals(pkg)) {
+                hookRedditDeepLinkRoutingDiagnostics(param);
+            }
         }
+    }
+
+    /**
+     * Observe Reddit's app-side decision after RedditDeepLinkActivity resolves a link.
+     * Reddit 2026.43.1 looks up a live MainActivity, gets its BaseScreen, and evaluates
+     * BaseScreen.P4(); true blocks its routing lambda, while false continues the route.
+     * Install only in Reddit's LSPosed scope and when detailed debug logging is enabled.
+     */
+    private void hookRedditDeepLinkRoutingDiagnostics(PackageLoadedParam param) {
+        String packageName = param.getPackageName();
+        ClassLoader classLoader = param.getDefaultClassLoader();
+        if (!"com.reddit.frontpage".equals(packageName) || classLoader == null
+                || !isDebugLoggingEnabledForClassLoader(classLoader)
+                || !sRedditDeepLinkDiagnosticPackages.add(packageName)) return;
+
+        int installed = 0;
+        try {
+            Class<?> deepLinkActivity = classLoader.loadClass(
+                    "com.reddit.frontpage.RedditDeepLinkActivity");
+            Method routeDecision = deepLinkActivity.getDeclaredMethod("v",
+                    deepLinkActivity, boolean.class, boolean.class);
+            if (!Modifier.isStatic(routeDecision.getModifiers())
+                    || routeDecision.getReturnType() != void.class) {
+                throw new NoSuchMethodException("unexpected RedditDeepLinkActivity.v signature");
+            }
+            routeDecision.setAccessible(true);
+            hook(routeDecision).intercept(chain -> {
+                String id = Long.toHexString(SystemClock.elapsedRealtimeNanos());
+                RedditDeepLinkRouteTrace previous = sRedditDeepLinkRouteTrace.get();
+                RedditDeepLinkRouteTrace trace = new RedditDeepLinkRouteTrace(id);
+                sRedditDeepLinkRouteTrace.set(trace);
+                logDiagnosticInfo("Reddit deep-link route decision begin trace=" + id
+                        + " arg1=" + chain.getArg(1) + " arg2=" + chain.getArg(2));
+                try {
+                    Object result = chain.proceed();
+                    String mainActivity = trace.mainActivityLookupObserved
+                            ? trace.mainActivityCandidate : "lookup-not-observed";
+                    String predicate = trace.screenPredicateObserved
+                            ? String.valueOf(trace.screenPredicateResult) : "not-observed";
+                    String route = Boolean.TRUE.equals(trace.screenPredicateResult)
+                            ? "blocked-by-screen-predicate"
+                            : trace.screenPredicateObserved ? "routing-lambda-allowed"
+                            : "predicate-not-observed";
+                    logDiagnosticInfo("Reddit deep-link route decision end trace=" + id
+                            + " mainActivity=" + mainActivity
+                            + " screenPredicate=" + predicate + " outcome=" + route);
+                    return result;
+                } finally {
+                    if (previous == null) sRedditDeepLinkRouteTrace.remove();
+                    else sRedditDeepLinkRouteTrace.set(previous);
+                }
+            });
+            installed++;
+        } catch (Throwable t) {
+            Log.w(TAG, "Reddit deep-link route hook unavailable: RedditDeepLinkActivity.v "
+                    + t.getClass().getSimpleName());
+        }
+
+        try {
+            // The decompiled Reddit method passes the selected MainActivity (or null)
+            // through this helper before evaluating the screen predicate.
+            Class<?> screenHelper = classLoader.loadClass("o8c");
+            Method getBaseScreen = screenHelper.getDeclaredMethod("t", Context.class);
+            getBaseScreen.setAccessible(true);
+            hook(getBaseScreen).intercept(chain -> {
+                Object result = chain.proceed();
+                RedditDeepLinkRouteTrace trace = sRedditDeepLinkRouteTrace.get();
+                if (trace != null) {
+                    trace.mainActivityLookupObserved = true;
+                    Object candidate = chain.getArg(0);
+                    trace.mainActivityCandidate = candidate instanceof Activity
+                            ? candidate.getClass().getName() : "none";
+                    logDiagnosticInfo("Reddit deep-link route decision trace=" + trace.id
+                            + " mainActivityCandidate=" + trace.mainActivityCandidate
+                            + " baseScreen=" + (result != null));
+                }
+                return result;
+            });
+            installed++;
+        } catch (Throwable t) {
+            Log.w(TAG, "Reddit deep-link route hook unavailable: o8c.t(Context) "
+                    + t.getClass().getSimpleName());
+        }
+
+        try {
+            Class<?> baseScreen = classLoader.loadClass("com.reddit.screen.BaseScreen");
+            Method screenPredicate = baseScreen.getDeclaredMethod("P4");
+            if (screenPredicate.getReturnType() != boolean.class) {
+                throw new NoSuchMethodException("unexpected BaseScreen.P4 return type");
+            }
+            screenPredicate.setAccessible(true);
+            hook(screenPredicate).intercept(chain -> {
+                Object result = chain.proceed();
+                RedditDeepLinkRouteTrace trace = sRedditDeepLinkRouteTrace.get();
+                if (trace != null) {
+                    trace.screenPredicateObserved = true;
+                    trace.screenPredicateResult = result instanceof Boolean
+                            ? (Boolean) result : null;
+                    logDiagnosticInfo("Reddit deep-link route decision trace=" + trace.id
+                            + " BaseScreen.P4=" + result
+                            + " decision=" + (Boolean.TRUE.equals(result)
+                            ? "block-routing" : "continue-routing"));
+                }
+                return result;
+            });
+            installed++;
+        } catch (Throwable t) {
+            Log.w(TAG, "Reddit deep-link route hook unavailable: BaseScreen.P4 "
+                    + t.getClass().getSimpleName());
+        }
+
+        logDiagnosticInfo("Reddit deep-link route hooks armed version=" + BuildConfig.VERSION_NAME
+                + " installed=" + installed + "/3");
     }
 
     /** Observe routed Activity intents in any application selected in the LSPosed scope. */
