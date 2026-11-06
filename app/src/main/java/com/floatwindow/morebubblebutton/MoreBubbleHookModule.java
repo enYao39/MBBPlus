@@ -1001,6 +1001,8 @@ public class MoreBubbleHookModule extends XposedModule {
                                     pending, "native-user-change-threw:" + t.getClass().getSimpleName());
                             return null;
                         }
+                        runOnSysuiMain(bubblesManager,
+                                () -> requestNativeNotificationBubbleExpansion(pending));
                         scheduleNativeNotificationBubbleVerification(pending);
                         return result;
                     }
@@ -3625,6 +3627,31 @@ public class MoreBubbleHookModule extends XposedModule {
                 key, reason, bubblesManager, entry);
         sPendingNativeNotificationBubbles.put(key, pending);
         return pending;
+    }
+
+    private static void requestNativeNotificationBubbleExpansion(
+            PendingNativeNotificationBubble pending) {
+        if (sPendingNativeNotificationBubbles.get(pending.key) != pending) return;
+        try {
+            for (Class<?> type = pending.bubblesManager.getClass(); type != null;
+                    type = type.getSuperclass()) {
+                for (Method method : type.getDeclaredMethods()) {
+                    Class<?>[] parameters = method.getParameterTypes();
+                    if (method.getName().equals("expandStackAndSelectBubble")
+                            && parameters.length == 1
+                            && parameters[0].getName().contains("NotificationEntry")
+                            && parameters[0].isInstance(pending.entry)) {
+                        method.setAccessible(true);
+                        method.invoke(pending.bubblesManager, pending.entry);
+                        Log.i(TAG, pending.reason + ": requested native notification Bubble expansion");
+                        return;
+                    }
+                }
+            }
+            Log.w(TAG, pending.reason + ": native notification Bubble expansion API unavailable");
+        } catch (Throwable t) {
+            Log.w(TAG, pending.reason + ": native notification Bubble expansion failed", t);
+        }
     }
 
     private static void scheduleNativeNotificationBubbleVerification(
