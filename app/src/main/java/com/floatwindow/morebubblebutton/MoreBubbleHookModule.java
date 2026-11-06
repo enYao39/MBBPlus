@@ -169,7 +169,9 @@ public class MoreBubbleHookModule extends XposedModule {
         int pendingIntentDispatch = hookPendingIntentDispatchResult(loader);
         logBubbleHookStatus(android.util.Log.INFO, "Bubble launch result diagnostics hooks version="
                 + BuildConfig.VERSION_NAME + " windowOrganizerTransactions="
-                + organizerTransactions + " pendingIntentDispatch=" + pendingIntentDispatch);
+                + organizerTransactions + " pendingIntentDispatch=" + pendingIntentDispatch
+                + " redditActivityStartResult="
+                + hookRedditActivityStartResult(loader));
     }
 
     /** Observe Reddit PendingIntent WCTs as they enter and leave WindowOrganizerController. */
@@ -266,17 +268,24 @@ public class MoreBubbleHookModule extends XposedModule {
                     if (target == null) return chain.proceed();
                     Intent fillInIntent = chain.getArg(finalFillInIndex) instanceof Intent intent
                             ? intent : null;
+                    Object canceledState = getFieldSystemUi(chain.getThisObject(), "canceled");
                     String traceId = Long.toHexString(SystemClock.elapsedRealtimeNanos());
                     android.util.Log.i(TAG, "Reddit PendingIntent dispatch trace=" + traceId
                             + " phase=send-enter target=" + target
+                            + " recordCanceled=" + (canceledState == null
+                            ? "unavailable" : canceledState)
                             + " fillInFlags=0x"
                             + Integer.toHexString(fillInIntent == null
                             ? 0 : fillInIntent.getFlags()));
                     try {
                         Object result = chain.proceed();
+                        Object canceledAfter = getFieldSystemUi(
+                                chain.getThisObject(), "canceled");
                         android.util.Log.i(TAG, "Reddit PendingIntent dispatch trace=" + traceId
                                 + " phase=send-return target=" + target + " "
-                                + describePendingIntentStartResult(result));
+                                + describePendingIntentStartResult(result)
+                                + " recordCanceledAfter=" + (canceledAfter == null
+                                ? "unavailable" : canceledAfter));
                         return result;
                     } catch (Throwable t) {
                         android.util.Log.w(TAG, "Reddit PendingIntent dispatch trace=" + traceId
@@ -296,6 +305,69 @@ public class MoreBubbleHookModule extends XposedModule {
         if (installed == 0) {
             logBubbleHookStatus(android.util.Log.WARN,
                     "Reddit PendingIntent dispatch diagnostics unavailable: sendInner signature missing");
+        }
+        return installed;
+    }
+
+    /** Observe the final ActivityStarter result for Reddit launches without logging Intent data. */
+    private int hookRedditActivityStartResult(ClassLoader loader) {
+        int installed = 0;
+        try {
+            Class<?> owner = loader.loadClass("com.android.server.wm.ActivityStarter");
+            for (Method method : owner.getDeclaredMethods()) {
+                if (!"executeRequest".equals(method.getName()) || method.isBridge()
+                        || method.getParameterCount() != 1
+                        || !"Request".equals(method.getParameterTypes()[0].getSimpleName())) {
+                    continue;
+                }
+                method.setAccessible(true);
+                hook(method).intercept(chain -> {
+                    Object request = chain.getArg(0);
+                    Object intentValue = getFieldSystemUi(request, "intent");
+                    if (!(intentValue instanceof Intent)) {
+                        intentValue = getFieldSystemUi(request, "mIntent");
+                    }
+                    Intent intent = intentValue instanceof Intent ? (Intent) intentValue : null;
+                    ComponentName component = intent != null ? intent.getComponent() : null;
+                    String targetPackage = component != null ? component.getPackageName()
+                            : intent != null ? intent.getPackage() : null;
+                    if (!REDDIT_PACKAGE.equals(targetPackage)) return chain.proceed();
+
+                    String traceId = Long.toHexString(SystemClock.elapsedRealtimeNanos());
+                    Object originatingPendingIntent = getFieldSystemUi(
+                            request, "originatingPendingIntent");
+                    if (originatingPendingIntent == null) {
+                        originatingPendingIntent = getFieldSystemUi(
+                                request, "mOriginatingPendingIntent");
+                    }
+                    android.util.Log.i(TAG, "Reddit ActivityStarter request trace=" + traceId
+                            + " phase=enter target=" + flattenComponent(component)
+                            + " reason=" + getFieldSystemUi(request, "reason")
+                            + " originatingPendingIntent="
+                            + (originatingPendingIntent != null));
+                    try {
+                        Object result = chain.proceed();
+                        android.util.Log.i(TAG, "Reddit ActivityStarter request trace=" + traceId
+                                + " phase=return "
+                                + describePendingIntentStartResult(result));
+                        return result;
+                    } catch (Throwable t) {
+                        android.util.Log.w(TAG, "Reddit ActivityStarter request trace=" + traceId
+                                + " phase=throw error=" + t.getClass().getSimpleName());
+                        throw t;
+                    }
+                });
+                installed++;
+            }
+        } catch (Throwable t) {
+            logBubbleHookStatus(android.util.Log.WARN,
+                    "Reddit ActivityStarter result diagnostics unavailable: "
+                            + t.getClass().getSimpleName());
+            return installed;
+        }
+        if (installed == 0) {
+            logBubbleHookStatus(android.util.Log.WARN,
+                    "Reddit ActivityStarter result diagnostics unavailable: executeRequest missing");
         }
         return installed;
     }
@@ -369,7 +441,9 @@ public class MoreBubbleHookModule extends XposedModule {
             Object value = method.invoke(null, code);
             successful = String.valueOf(value);
         } catch (Throwable ignored) {}
-        return "resultCode=" + code + " successful=" + successful;
+        return "resultCode=" + code
+                + (code == -96 ? " resultName=START_CANCELED" : "")
+                + " successful=" + successful;
     }
 
     private static String describeHookResult(Object result) {
