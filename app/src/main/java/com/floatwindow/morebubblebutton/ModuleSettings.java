@@ -47,6 +47,15 @@ public class ModuleSettings {
         sDebugRemotePrefs = preferences;
     }
 
+    static boolean isRemoteDebugLoggingEnabled() {
+        SharedPreferences remote = sDebugRemotePrefs;
+        try {
+            return remote != null && remote.getBoolean(KEY_DEBUG_LOGGING_ENABLED, false);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
     private static SharedPreferences getPrefs(Context ctx) {
         return ctx.getApplicationContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
     }

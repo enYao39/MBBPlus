@@ -47,6 +47,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam;
+import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 
 public class MoreBubbleHookModule extends XposedModule {
     private static final String TAG = "MoreBubbleModule";
@@ -59,6 +60,7 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final long BUBBLE_TASK_DIAGNOSTIC_WINDOW_MS = 15000L;
     private static final ThreadLocal<OutgoingActivityLaunchTrace> sOutgoingActivityLaunchTrace =
             new ThreadLocal<>();
+    private final ThreadLocal<String> mTaskSelectionTrace = new ThreadLocal<>();
     private ClassLoader mLauncherClassLoader;
     private static Object sBubblesManager;
     private static final String HEADS_UP_HANDLE_TAG = "more_bubble_heads_up_handle";
@@ -87,6 +89,138 @@ public class MoreBubbleHookModule extends XposedModule {
                     + t.getClass().getSimpleName());
         }
         Log.i(TAG, "MoreBubbleModule: " + param.getProcessName() + " | API " + getApiVersion());
+    }
+
+    @Override
+    public void onSystemServerStarting(SystemServerStartingParam param) {
+        ClassLoader loader = param.getClassLoader();
+        int starter = hookTaskSelectionMethods(loader, "ActivityStarter",
+                "startActivityInner", "computeTargetTask", "recycleTask", "setNewTask");
+        int search = hookTaskSelectionMethods(loader, "RootWindowContainer", "findTask");
+        int candidates = hookTaskSelectionMethods(loader, "RootWindowContainer$FindTaskResult", "test");
+        logBubbleHookStatus(android.util.Log.INFO, "Bubble ATMS hooks version="
+                + BuildConfig.VERSION_NAME + " starter=" + starter
+                + " findTask=" + search + " candidates=" + candidates);
+    }
+
+    private int hookTaskSelectionMethods(ClassLoader loader, String owner, String... names) {
+        int count = 0;
+        try {
+            Class<?> type = loader.loadClass("com.android.server.wm." + owner);
+            Method[] methods = type.getDeclaredMethods();
+            for (String name : names) {
+                int matches = 0;
+                for (Method method : methods) {
+                    if (!method.getName().equals(name) || method.isBridge()) continue;
+                    if ("startActivityInner".equals(name)
+                            && (method.getParameterCount() < 2
+                            || !"ActivityRecord".equals(method.getParameterTypes()[0].getSimpleName())
+                            || !"ActivityRecord".equals(method.getParameterTypes()[1].getSimpleName()))) continue;
+                    if ("test".equals(name) && (method.getParameterCount() != 1
+                            || !"Task".equals(method.getParameterTypes()[0].getSimpleName()))) continue;
+                    try {
+                        method.setAccessible(true);
+                        hook(method).intercept(chain -> {
+                            Object receiver = chain.getThisObject();
+                            boolean entry = "startActivityInner".equals(name);
+                            if (entry) {
+                                Object activity = chain.getArg(0);
+                                Object value = getFieldSystemUi(activity, "intent");
+                                ComponentName component = value instanceof Intent intent
+                                        ? intent.getComponent() : null;
+                                if (component == null
+                                        || !"com.reddit.frontpage".equals(component.getPackageName())
+                                        || !ModuleSettings.isRemoteDebugLoggingEnabled()) {
+                                    return chain.proceed();
+                                }
+                                String previous = mTaskSelectionTrace.get();
+                                String id = Long.toHexString(SystemClock.elapsedRealtimeNanos());
+                                mTaskSelectionTrace.set(id);
+                                try {
+                                    logAtmsTrace(id, "start component=" + component.flattenToShortString()
+                                            + " sourceTask=" + describeAtmsTask(activityTask(chain.getArg(1))));
+                                    Object result = chain.proceed();
+                                    logAtmsTrace(id, "final result=" + result + " actualTask="
+                                            + describeAtmsTask(activityTask(activity))
+                                            + " targetTask=" + describeAtmsTask(
+                                                    getFieldSystemUi(receiver, "mTargetTask"))
+                                            + " targetRoot=" + describeAtmsTask(
+                                                    getFieldSystemUi(receiver, "mTargetRootTask"))
+                                            + " flags=" + getFieldSystemUi(receiver, "mLaunchFlags")
+                                            + " launchMode=" + getFieldSystemUi(receiver, "mLaunchMode"));
+                                    return result;
+                                } finally {
+                                    if (previous == null) mTaskSelectionTrace.remove();
+                                    else mTaskSelectionTrace.set(previous);
+                                }
+                            }
+                            String id = mTaskSelectionTrace.get();
+                            if (id == null) return chain.proceed();
+                            Object result = chain.proceed();
+                            if ("test".equals(name)) {
+                                Object candidate = chain.getArg(0);
+                                Object component = getFieldSystemUi(candidate, "realActivity");
+                                if (!(component instanceof ComponentName activity)
+                                        || !"com.reddit.frontpage".equals(activity.getPackageName())) {
+                                    return result;
+                                }
+                                logAtmsTrace(id, "candidate=" + describeAtmsTask(candidate)
+                                        + " component=" + activity.flattenToShortString()
+                                        + " rootAffinity=" + taskDiagnosticField(candidate, "rootAffinity")
+                                        + " exactMatch=" + result + " affinityCandidate="
+                                        + describeAtmsTask(activityTask(
+                                                getFieldSystemUi(receiver, "mCandidateRecord")))
+                                        + " includeBubble=" + getFieldSystemUi(receiver,
+                                                "mIncludeLaunchedFromBubble"));
+                            } else if ("findTask".equals(name)) {
+                                logAtmsTrace(id, "findTask selected=" + describeAtmsTask(activityTask(result)));
+                            } else {
+                                Object task = "computeTargetTask".equals(name) ? result
+                                        : "setNewTask".equals(name)
+                                        ? activityTask(getFieldSystemUi(receiver, "mStartActivity"))
+                                        : chain.getArg(0);
+                                logAtmsTrace(id, name + " task=" + describeAtmsTask(task)
+                                        + " flags=" + getFieldSystemUi(receiver, "mLaunchFlags")
+                                        + " launchMode=" + getFieldSystemUi(receiver, "mLaunchMode")
+                                        + " addingToTask=" + getFieldSystemUi(receiver, "mAddingToTask"));
+                            }
+                            return result;
+                        });
+                        count++;
+                        matches++;
+                    } catch (Throwable t) {
+                        logBubbleHookStatus(android.util.Log.WARN, "Bubble ATMS hook failed "
+                                + owner + "." + name + " error=" + t.getClass().getSimpleName());
+                    }
+                }
+                if (matches == 0) logBubbleHookStatus(android.util.Log.WARN,
+                        "Bubble ATMS hook unavailable " + owner + "." + name);
+            }
+        } catch (Throwable t) {
+            logBubbleHookStatus(android.util.Log.WARN, "Bubble ATMS hook unavailable " + owner
+                    + " error=" + t.getClass().getSimpleName());
+        }
+        return count;
+    }
+
+    private void logAtmsTrace(String id, String message) {
+        // This runs under the activity start lock. Keep it local and omit Intent contents.
+        android.util.Log.i(TAG, "Bubble ATMS trace=" + id + " " + message);
+    }
+
+    private static Object activityTask(Object activity) {
+        return invokeSystemUi(activity, "getTask");
+    }
+
+    private static String describeAtmsTask(Object task) {
+        if (task == null) return "none";
+        Object parent = invokeSystemUi(task, "getParent");
+        return "{id=" + taskDiagnosticField(task, "mTaskId")
+                + ",userId=" + taskDiagnosticField(task, "mUserId")
+                + ",displayId=" + invokeSystemUi(task, "getDisplayId")
+                + ",parentTaskId=" + taskDiagnosticField(parent, "mTaskId")
+                + ",appBubble=" + invokeSystemUi(task, "isAppBubble")
+                + ",windowingMode=" + invokeSystemUi(task, "getWindowingMode") + "}";
     }
 
     @Override
