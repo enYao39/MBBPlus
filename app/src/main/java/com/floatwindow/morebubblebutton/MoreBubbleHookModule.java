@@ -994,11 +994,16 @@ public class MoreBubbleHookModule extends XposedModule {
                             return null;
                         }
                         Log.i(TAG, "Bubble button: Freeform unavailable, using Bubble");
-                    } else if (sBubblesManager != null
-                            && expandAppBubbleFromNotification(sBubblesManager, entry,
-                            "Bubble button")) {
-                        Log.i(TAG, "Bubble button handled by Bubble");
-                        return null;
+                    } else if (sBubblesManager != null) {
+                        if (shouldUseNativeNotificationBubblePath(
+                                sBubblesManager, entry, "Bubble button")) {
+                            return chain.proceed();
+                        }
+                        if (expandAppBubbleFromNotification(sBubblesManager, entry,
+                                "Bubble button")) {
+                            Log.i(TAG, "Bubble button handled by Bubble");
+                            return null;
+                        }
                     }
                 }
                 // Preserve the native path if the module cannot construct an app Bubble.
