@@ -902,7 +902,7 @@ public class MoreBubbleHookModule extends XposedModule {
                                         chain.getThisObject(), entry)) {
                                     if (!shouldUseNativeNotificationBubblePath(
                                             chain.getThisObject(), entry, "expand guard")) {
-                                        launchNotificationFullscreen(entry,
+                                        Log.w(TAG,
                                                 "expand guard: native compatibility unavailable");
                                         return null;
                                     }
@@ -910,7 +910,7 @@ public class MoreBubbleHookModule extends XposedModule {
                                             beginNativeNotificationBubbleAttempt(
                                                     chain.getThisObject(), entry, "expand guard");
                                     if (pending == null) {
-                                        launchNotificationFullscreen(entry,
+                                        Log.w(TAG,
                                                 "expand guard: native result cannot be tracked");
                                         return null;
                                     }
@@ -980,7 +980,7 @@ public class MoreBubbleHookModule extends XposedModule {
                     }
 
                     if (compatibilitySelected && !useNativeRoute) {
-                        launchNotificationFullscreen(entry,
+                        Log.w(TAG,
                                 "user change: native compatibility unavailable");
                         return null;
                     }
@@ -989,7 +989,7 @@ public class MoreBubbleHookModule extends XposedModule {
                                 beginNativeNotificationBubbleAttempt(
                                         bubblesManager, entry, "user change");
                         if (pending == null) {
-                            launchNotificationFullscreen(entry,
+                            Log.w(TAG,
                                     "user change: native result cannot be tracked");
                             return null;
                         }
@@ -1063,13 +1063,13 @@ public class MoreBubbleHookModule extends XposedModule {
                         Log.i(TAG, "Bubble button: Freeform unavailable, using Bubble");
                     } else if (compatibilitySelected) {
                         if (sBubblesManager == null) {
-                            launchNotificationFullscreen(entry,
+                            Log.w(TAG,
                                     "Bubble button: Bubble manager unavailable");
                             return null;
                         }
                         if (!shouldUseNativeNotificationBubblePath(
                                 sBubblesManager, entry, "Bubble button")) {
-                            launchNotificationFullscreen(entry,
+                            Log.w(TAG,
                                     "Bubble button: native compatibility unavailable");
                             return null;
                         }
@@ -1077,7 +1077,7 @@ public class MoreBubbleHookModule extends XposedModule {
                                 beginNativeNotificationBubbleAttempt(
                                         sBubblesManager, entry, "Bubble button");
                         if (pending == null) {
-                            launchNotificationFullscreen(entry,
+                            Log.w(TAG,
                                     "Bubble button: native result cannot be tracked");
                             return null;
                         }
@@ -3822,11 +3822,42 @@ public class MoreBubbleHookModule extends XposedModule {
                 pending.bubblesManager, pending.key);
         Context context = getBubblesManagerContext(pending.bubblesManager);
         logDetailedInfo(context, pending.reason
-                + ": native notification Bubble unavailable; opening fullscreen"
+                + ": native notification Bubble unavailable"
                 + " key=" + pending.key + " failure=" + failure
                 + " state=" + state.status + " taskId=" + state.taskId);
-        launchNotificationFullscreen(pending.entry,
-                pending.reason + ": native Bubble fullscreen fallback");
+        try {
+            probeRedditBubble(pending, context);
+        } catch (RuntimeException e) {
+            logDetailedInfo(context, "Reddit native Bubble probe failed: "
+                    + e.getClass().getSimpleName());
+        }
+    }
+
+    private static void probeRedditBubble(PendingNativeNotificationBubble pending, Context context) {
+        if (!isDebugLoggingEnabled(context)) return;
+        Object sbn = getFieldSystemUi(pending.entry, "mSbn");
+        if (!"com.reddit.frontpage".equals(invokeSystemUi(sbn, "getPackageName"))) return;
+        Object shell = getFieldSystemUi(pending.bubblesManager, "mBubbles");
+        Object data = getFieldSystemUi(getFieldSystemUi(shell, "this$0"), "mBubbleData");
+        for (String field : new String[]{"mBubbles", "mOverflowBubbles", "mPendingBubbles",
+                "mSuppressedBubbles"}) {
+            Object value = getFieldSystemUi(data, field);
+            java.util.Collection<?> candidates = value instanceof Map<?, ?> map ? map.values()
+                    : value instanceof java.util.Collection<?> collection ? collection : null;
+            int reddit = 0;
+            boolean exact = false;
+            if (candidates != null) {
+                for (Object bubble : candidates) {
+                    if ("com.reddit.frontpage".equals(invokeSystemUi(bubble, "getPackageName"))) {
+                        reddit++;
+                    }
+                    exact |= pending.key.equals(getBubbleKey(bubble));
+                }
+            }
+            logDetailedInfo(context, "Reddit native Bubble probe " + field
+                    + " readable=" + (candidates != null) + " redditCandidates=" + reddit
+                    + " exactKey=" + exact);
+        }
     }
 
     private static boolean launchNotificationViaNativeCompatibility(Context context,
@@ -3839,18 +3870,18 @@ public class MoreBubbleHookModule extends XposedModule {
                 : isNativeNotificationBubbleCompatibilitySelected(bubblesManager, entry);
         if (!compatibilitySelected) return false;
         if (bubblesManager == null) {
-            launchNotificationFullscreen(entry, reason + ": Bubble manager unavailable");
+            Log.w(TAG, reason + ": Bubble manager unavailable");
             return true;
         }
         if (!shouldUseNativeNotificationBubblePath(bubblesManager, entry, reason)) {
-            launchNotificationFullscreen(entry, reason + ": native compatibility unavailable");
+            Log.w(TAG, reason + ": native compatibility unavailable");
             return true;
         }
         if (!sBubblesManagerUserChangeHookInstalled) {
             Context managerContext = getBubblesManagerContext(bubblesManager);
             logDetailedInfo(managerContext, reason
-                    + ": native user-change hook unavailable; opening fullscreen");
-            launchNotificationFullscreen(entry, reason + ": native user-change hook unavailable");
+                    + ": native user-change hook unavailable");
+            Log.w(TAG, reason + ": native user-change hook unavailable");
             return true;
         }
         Method userChange = null;
@@ -3869,7 +3900,7 @@ public class MoreBubbleHookModule extends XposedModule {
             }
         }
         if (userChange == null) {
-            launchNotificationFullscreen(entry, reason + ": native user-change API unavailable");
+            Log.w(TAG, reason + ": native user-change API unavailable");
             return true;
         }
         Method finalUserChange = userChange;
@@ -3877,7 +3908,7 @@ public class MoreBubbleHookModule extends XposedModule {
             try {
                 finalUserChange.invoke(bubblesManager, entry, true);
             } catch (Throwable t) {
-                launchNotificationFullscreen(entry,
+                Log.w(TAG,
                         reason + ": native user-change invocation failed");
             }
         };
