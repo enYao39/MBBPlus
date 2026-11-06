@@ -962,7 +962,8 @@ public class MoreBubbleHookModule extends XposedModule {
         int transitionStartHooks = hookBubblePendingIntentOptions(cl,
                 "com.android.wm.shell.taskview.TaskViewTransitions", "startActivity");
 
-        Log.i(TAG, "Bubble task diagnostics hooks organizer=" + organizerHooks
+        logBubbleHookStatus(android.util.Log.INFO, "Bubble task diagnostics hooks version="
+                + BuildConfig.VERSION_NAME + " organizer=" + organizerHooks
                 + " helperListener=" + bubbleListenerHooks
                 + " taskViewListener=" + taskViewListenerHooks
                 + " taskViewStart=" + taskViewStartHooks
@@ -1203,7 +1204,7 @@ public class MoreBubbleHookModule extends XposedModule {
                                         ? safePendingIntentCreator(pending) : "unknown";
                                 Intent target = factory && chain.getArg(intentIndex) instanceof Intent intent
                                         ? intent : null;
-                                Log.i(TAG, "Bubble Shell PendingIntent options"
+                                logBubbleHookStatus(android.util.Log.INFO, "Bubble Shell PendingIntent options"
                                         + " entry=" + owner.getSimpleName() + "." + methodName
                                         + " activePackages=" + activePackages
                                         + " pendingIntentCreator=" + creator
@@ -1221,10 +1222,19 @@ public class MoreBubbleHookModule extends XposedModule {
                 installed++;
             }
         } catch (Throwable t) {
-            Log.w(TAG, "Bubble Shell PendingIntent hook unavailable: " + className
-                    + " error=" + t.getClass().getSimpleName());
+            logBubbleHookStatus(android.util.Log.WARN, "Bubble Shell PendingIntent hook unavailable: "
+                    + className + "." + methodName + " error=" + t.getClass().getSimpleName());
         }
         return installed;
+    }
+
+    private void logBubbleHookStatus(int priority, String message) {
+        android.util.Log.println(priority, TAG, message);
+        try {
+            log(priority, TAG, message);
+        } catch (RuntimeException | LinkageError ignored) {
+            // Keep logcat available on frameworks that cannot write the module log.
+        }
     }
 
     private static String describeBubbleLaunchOptions(ActivityOptions options,
