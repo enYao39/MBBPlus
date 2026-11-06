@@ -68,6 +68,12 @@ public class MoreBubbleHookModule extends XposedModule {
     private static Object sBubblesManager;
     private static final String HEADS_UP_HANDLE_TAG = "more_bubble_heads_up_handle";
     private static final int WINDOWING_MODE_FREEFORM = 5;
+    private static final String REDDIT_NOTIFICATION_ACTIVITY =
+            "com.reddit.frontpage/com.reddit.notification.impl.action.NotificationActivity";
+    private static final String REDDIT_DEEP_LINK_ACTIVITY =
+            "com.reddit.frontpage/com.reddit.frontpage.RedditDeepLinkActivity";
+    private static final String REDDIT_COMPAT_LAUNCH =
+            "com.floatwindow.morebubblebutton.REDDIT_COMPAT_LAUNCH";
     private static final long SWIPE_HANDLE_MIN_DISTANCE_DP = 24L;
     private static final String LMO_FREEFORM_SERVICE = "lmo_freeform";
     private static final String LMO_FREEFORM_DESCRIPTOR =
@@ -96,6 +102,7 @@ public class MoreBubbleHookModule extends XposedModule {
 
     @Override
     public void onSystemServerStarting(SystemServerStartingParam param) {
+        hookRedditCompatibilityLaunch(param.getClassLoader());
         // ATMS task-selection observers are diagnostic-only; don't install them in normal mode.
         if (!ModuleSettings.isRemoteDebugLoggingEnabled()) return;
         ClassLoader loader = param.getClassLoader();
@@ -106,6 +113,76 @@ public class MoreBubbleHookModule extends XposedModule {
         logBubbleHookStatus(android.util.Log.INFO, "Bubble ATMS hooks version="
                 + BuildConfig.VERSION_NAME + " starter=" + starter
                 + " findTask=" + search + " candidates=" + candidates);
+    }
+
+    private void hookRedditCompatibilityLaunch(ClassLoader loader) {
+        try {
+            Class<?> starter = loader.loadClass("com.android.server.wm.ActivityStarter");
+            java.lang.reflect.Field flags = starter.getDeclaredField("mLaunchFlags");
+            java.lang.reflect.Field mode = starter.getDeclaredField("mLaunchMode");
+            flags.setAccessible(true);
+            mode.setAccessible(true);
+            for (Method method : starter.getDeclaredMethods()) {
+                Class<?>[] types = method.getParameterTypes();
+                if (!method.getName().equals("setInitialState") || types.length < 2
+                        || !types[0].getSimpleName().equals("ActivityRecord")) continue;
+                int sourceIndex = -1;
+                for (int i = 1; i < types.length; i++) {
+                    if (types[i] == types[0]) {
+                        sourceIndex = i;
+                        break;
+                    }
+                }
+                if (sourceIndex < 0) continue;
+                int sourceArg = sourceIndex;
+                method.setAccessible(true);
+                hook(method).intercept(chain -> {
+                    Object result = chain.proceed();
+                    try {
+                        Object target = chain.getArg(0);
+                        Object source = chain.getArg(sourceArg);
+                        if (!matchesRedditCompatibilityRedirect(source, target)) return result;
+                        Object receiver = chain.getThisObject();
+                        int launchFlags = flags.getInt(receiver);
+                        if ((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0) return result;
+                        // singleTask can reintroduce NEW_TASK during task selection.
+                        mode.setInt(receiver, android.content.pm.ActivityInfo.LAUNCH_MULTIPLE);
+                        flags.setInt(receiver, launchFlags & ~Intent.FLAG_ACTIVITY_NEW_TASK);
+                        ((Intent) getFieldSystemUi(source, "intent")).removeExtra(REDDIT_COMPAT_LAUNCH);
+                        Log.i(TAG, "Reddit Bubble compatibility: retained deep link in source task");
+                    } catch (Exception e) {
+                        Log.w(TAG, "Reddit Bubble compatibility redirect unavailable", e);
+                    }
+                    return result;
+                });
+                Log.i(TAG, "Reddit Bubble compatibility launch hook installed");
+                return;
+            }
+            Log.w(TAG, "Reddit Bubble compatibility: ActivityStarter.setInitialState unavailable");
+        } catch (Throwable t) {
+            Log.w(TAG, "Reddit Bubble compatibility launch hook unavailable", t);
+        }
+    }
+
+    private static boolean matchesRedditCompatibilityRedirect(Object source, Object target) {
+        if (!(getFieldSystemUi(source, "intent") instanceof Intent sourceIntent)
+                || !(getFieldSystemUi(target, "intent") instanceof Intent targetIntent)
+                || !ComponentName.unflattenFromString(REDDIT_NOTIFICATION_ACTIVITY)
+                        .equals(sourceIntent.getComponent())
+                || !ComponentName.unflattenFromString(REDDIT_DEEP_LINK_ACTIVITY)
+                        .equals(targetIntent.getComponent())) return false;
+        Object user = getFieldSystemUi(source, "mUserId");
+        if (!(user instanceof Integer) || !user.equals(getFieldSystemUi(target, "mUserId"))) {
+            return false;
+        }
+        Object task = activityTask(source);
+        if (task == null || !(Boolean.TRUE.equals(invokeSystemUi(task, "isAppBubble"))
+                || Boolean.TRUE.equals(invokeSystemUi(source, "getLaunchedFromBubble")))) {
+            return false;
+        }
+        long startedAt = sourceIntent.getLongExtra(REDDIT_COMPAT_LAUNCH, -1L);
+        long age = SystemClock.elapsedRealtime() - startedAt;
+        return startedAt >= 0 && age >= 0 && age < 5000L;
     }
 
     private int hookTaskSelectionMethods(ClassLoader loader, String owner, String... names) {
@@ -3535,6 +3612,10 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             if (targetIntent.getPackage() == null) {
                 targetIntent.setPackage(pkg);
+            }
+            if (upstreamCompatibility && ComponentName.unflattenFromString(
+                    REDDIT_NOTIFICATION_ACTIVITY).equals(targetIntent.getComponent())) {
+                targetIntent.putExtra(REDDIT_COMPAT_LAUNCH, SystemClock.elapsedRealtime());
             }
             targetIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
             Object entryPoint = findEntryPoint(controller.getClass().getClassLoader(), "NOTIFICATION");
