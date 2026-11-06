@@ -59,6 +59,8 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final String REDDIT_PACKAGE = "com.reddit.frontpage";
     private static final String REDDIT_MAIN_ACTIVITY =
             "com.reddit.launch.main.MainActivity";
+    private static final String REDDIT_NOTIFICATION_ACTIVITY =
+            "com.reddit.notification.impl.action.NotificationActivity";
     private static final long REDDIT_BUBBLE_TASK_CREATE_TIMEOUT_MS = 8000L;
     private static final long REDDIT_BUBBLE_MAIN_ACTIVITY_READY_DELAY_MS = 650L;
     private static final long REDDIT_BUBBLE_PENDING_INTENT_SPACING_MS = 350L;
@@ -163,6 +165,217 @@ public class MoreBubbleHookModule extends XposedModule {
         logBubbleHookStatus(android.util.Log.INFO, "Bubble ATMS hooks version="
                 + BuildConfig.VERSION_NAME + " starter=" + starter
                 + " findTask=" + search + " candidates=" + candidates);
+        int organizerTransactions = hookWindowOrganizerPendingIntentApplication(loader);
+        int pendingIntentDispatch = hookPendingIntentDispatchResult(loader);
+        logBubbleHookStatus(android.util.Log.INFO, "Bubble launch result diagnostics hooks version="
+                + BuildConfig.VERSION_NAME + " windowOrganizerTransactions="
+                + organizerTransactions + " pendingIntentDispatch=" + pendingIntentDispatch);
+    }
+
+    /** Observe Reddit PendingIntent WCTs as they enter and leave WindowOrganizerController. */
+    private int hookWindowOrganizerPendingIntentApplication(ClassLoader loader) {
+        int installed = 0;
+        try {
+            Class<?> owner = loader.loadClass("com.android.server.wm.WindowOrganizerController");
+            Class<?> transactionClass = loader.loadClass(
+                    "android.window.WindowContainerTransaction");
+            for (Method method : owner.getDeclaredMethods()) {
+                String name = method.getName();
+                if (!("applyTransaction".equals(name)
+                        || "applySyncTransaction".equals(name)
+                        || "startTransition".equals(name)) || method.isBridge()) continue;
+                int transactionIndex = -1;
+                Class<?>[] parameters = method.getParameterTypes();
+                for (int i = 0; i < parameters.length; i++) {
+                    if (transactionClass.isAssignableFrom(parameters[i])) {
+                        transactionIndex = i;
+                        break;
+                    }
+                }
+                if (transactionIndex < 0) continue;
+                method.setAccessible(true);
+                final int finalTransactionIndex = transactionIndex;
+                hook(method).intercept(chain -> {
+                    Object transaction = chain.getArg(finalTransactionIndex);
+                    String request = summarizeRedditPendingIntentOperations(transaction);
+                    if (request == null) return chain.proceed();
+
+                    String traceId = Long.toHexString(SystemClock.elapsedRealtimeNanos());
+                    android.util.Log.i(TAG, "Bubble WCT PendingIntent trace=" + traceId
+                            + " phase=apply-enter method=" + name + " " + request);
+                    try {
+                        Object result = chain.proceed();
+                        android.util.Log.i(TAG, "Bubble WCT PendingIntent trace=" + traceId
+                                + " phase=apply-return method=" + name
+                                + " result=" + describeHookResult(result));
+                        return result;
+                    } catch (Throwable t) {
+                        android.util.Log.w(TAG, "Bubble WCT PendingIntent trace=" + traceId
+                                + " phase=apply-throw method=" + name
+                                + " error=" + t.getClass().getSimpleName());
+                        throw t;
+                    }
+                });
+                installed++;
+            }
+        } catch (Throwable t) {
+            logBubbleHookStatus(android.util.Log.WARN,
+                    "Bubble WCT PendingIntent diagnostics unavailable: "
+                            + t.getClass().getSimpleName());
+            return installed;
+        }
+        if (installed == 0) {
+            logBubbleHookStatus(android.util.Log.WARN,
+                    "Bubble WCT PendingIntent diagnostics unavailable: no transaction entry point");
+        }
+        return installed;
+    }
+
+    /** Observe the ActivityManager start result returned by the actual PendingIntent send. */
+    private int hookPendingIntentDispatchResult(ClassLoader loader) {
+        int installed = 0;
+        try {
+            Class<?> owner = loader.loadClass("com.android.server.am.PendingIntentRecord");
+            Method[] methods = owner.getDeclaredMethods();
+            int longestSignature = -1;
+            for (Method method : methods) {
+                if (!"sendInner".equals(method.getName()) || method.isBridge()) continue;
+                boolean hasIntent = false;
+                for (Class<?> parameter : method.getParameterTypes()) {
+                    if (Intent.class.isAssignableFrom(parameter)) hasIntent = true;
+                }
+                if (hasIntent) longestSignature = Math.max(
+                        longestSignature, method.getParameterCount());
+            }
+            for (Method method : methods) {
+                if (!"sendInner".equals(method.getName()) || method.isBridge()
+                        || method.getParameterCount() != longestSignature) continue;
+                int fillInIndex = -1;
+                Class<?>[] parameters = method.getParameterTypes();
+                for (int i = 0; i < parameters.length; i++) {
+                    if (Intent.class.isAssignableFrom(parameters[i])) {
+                        fillInIndex = i;
+                        break;
+                    }
+                }
+                if (fillInIndex < 0) continue;
+                method.setAccessible(true);
+                final int finalFillInIndex = fillInIndex;
+                hook(method).intercept(chain -> {
+                    String target = summarizeRedditPendingIntentRecord(chain.getThisObject());
+                    if (target == null) return chain.proceed();
+                    Intent fillInIntent = chain.getArg(finalFillInIndex) instanceof Intent intent
+                            ? intent : null;
+                    String traceId = Long.toHexString(SystemClock.elapsedRealtimeNanos());
+                    android.util.Log.i(TAG, "Reddit PendingIntent dispatch trace=" + traceId
+                            + " phase=send-enter target=" + target
+                            + " fillInFlags=0x"
+                            + Integer.toHexString(fillInIntent == null
+                            ? 0 : fillInIntent.getFlags()));
+                    try {
+                        Object result = chain.proceed();
+                        android.util.Log.i(TAG, "Reddit PendingIntent dispatch trace=" + traceId
+                                + " phase=send-return target=" + target + " "
+                                + describePendingIntentStartResult(result));
+                        return result;
+                    } catch (Throwable t) {
+                        android.util.Log.w(TAG, "Reddit PendingIntent dispatch trace=" + traceId
+                                + " phase=send-throw target=" + target
+                                + " error=" + t.getClass().getSimpleName());
+                        throw t;
+                    }
+                });
+                installed++;
+            }
+        } catch (Throwable t) {
+            logBubbleHookStatus(android.util.Log.WARN,
+                    "Reddit PendingIntent dispatch diagnostics unavailable: "
+                            + t.getClass().getSimpleName());
+            return installed;
+        }
+        if (installed == 0) {
+            logBubbleHookStatus(android.util.Log.WARN,
+                    "Reddit PendingIntent dispatch diagnostics unavailable: sendInner signature missing");
+        }
+        return installed;
+    }
+
+    /** Return a privacy-safe summary only for WindowContainerTransactions containing a Reddit PI. */
+    private static String summarizeRedditPendingIntentOperations(Object transaction) {
+        Object operations = invokeSystemUi(transaction, "getHierarchyOps");
+        if (!(operations instanceof Iterable<?>)) {
+            operations = getFieldSystemUi(transaction, "mHierarchyOps");
+        }
+        if (!(operations instanceof Iterable<?>)) return null;
+
+        List<String> matches = new ArrayList<>();
+        for (Object operation : (Iterable<?>) operations) {
+            Object pending = invokeSystemUi(operation, "getPendingIntent");
+            if (!(pending instanceof PendingIntent)) {
+                pending = getFieldSystemUi(operation, "mPendingIntent");
+            }
+            if (!(pending instanceof PendingIntent)) continue;
+            PendingIntent pendingIntent = (PendingIntent) pending;
+            String creator = safePendingIntentCreator(pendingIntent);
+            if (!REDDIT_PACKAGE.equals(creator)) continue;
+            Object activityIntent = invokeSystemUi(operation, "getActivityIntent");
+            if (!(activityIntent instanceof Intent)) {
+                activityIntent = getFieldSystemUi(operation, "mActivityIntent");
+            }
+            Intent fillIn = activityIntent instanceof Intent ? (Intent) activityIntent : null;
+            matches.add("creator=" + creator
+                    + " operationType=" + invokeSystemUi(operation, "getType")
+                    + " pendingIntentIsActivity=" + invokeSystemUi(pendingIntent, "isActivity")
+                    + " fillInComponent=" + flattenComponent(
+                            fillIn != null ? fillIn.getComponent() : null)
+                    + " fillInFlags=0x" + Integer.toHexString(
+                            fillIn != null ? fillIn.getFlags() : 0));
+        }
+        return matches.isEmpty() ? null
+                : "redditPendingIntentOps=" + matches.size() + " details=" + matches;
+    }
+
+    /** Read only the creator and target component; notification extras are intentionally omitted. */
+    private static String summarizeRedditPendingIntentRecord(Object record) {
+        Object key = getFieldSystemUi(record, "key");
+        if (key == null) key = getFieldSystemUi(record, "mKey");
+        if (key == null) return null;
+        Object creatorValue = getFieldSystemUi(key, "packageName");
+        String creator = creatorValue != null ? String.valueOf(creatorValue) : "unknown";
+        if (!REDDIT_PACKAGE.equals(creator)) return null;
+        Object requestValue = getFieldSystemUi(key, "requestIntent");
+        if (requestValue == null) requestValue = getFieldSystemUi(key, "intent");
+        Intent requestIntent = requestValue instanceof Intent ? (Intent) requestValue : null;
+        ComponentName component = requestIntent != null ? requestIntent.getComponent() : null;
+        String targetPackage = component != null ? component.getPackageName()
+                : requestIntent != null ? requestIntent.getPackage() : null;
+        if (targetPackage != null && !REDDIT_PACKAGE.equals(targetPackage)) return null;
+        if (component != null && !REDDIT_NOTIFICATION_ACTIVITY.equals(component.getClassName())) {
+            return null;
+        }
+        return "creator=" + creator + " component=" + flattenComponent(component)
+                + " requestFlags=0x" + Integer.toHexString(
+                        requestIntent != null ? requestIntent.getFlags() : 0);
+    }
+
+    private static String describePendingIntentStartResult(Object result) {
+        if (!(result instanceof Number)) return "result=" + describeHookResult(result);
+        int code = ((Number) result).intValue();
+        String successful = "unknown";
+        try {
+            Method method = ActivityManager.class.getDeclaredMethod(
+                    "isStartResultSuccessful", int.class);
+            method.setAccessible(true);
+            Object value = method.invoke(null, code);
+            successful = String.valueOf(value);
+        } catch (Throwable ignored) {}
+        return "resultCode=" + code + " successful=" + successful;
+    }
+
+    private static String describeHookResult(Object result) {
+        if (result == null) return "void";
+        if (result instanceof Number || result instanceof Boolean) return String.valueOf(result);
+        return result.getClass().getSimpleName();
     }
 
     private int hookTaskSelectionMethods(ClassLoader loader, String owner, String... names) {
