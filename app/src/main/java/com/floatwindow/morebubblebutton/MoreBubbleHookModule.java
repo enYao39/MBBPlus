@@ -62,6 +62,7 @@ public class MoreBubbleHookModule extends XposedModule {
     private static final long REDDIT_BUBBLE_TASK_CREATE_TIMEOUT_MS = 8000L;
     private static final long REDDIT_BUBBLE_MAIN_ACTIVITY_READY_DELAY_MS = 650L;
     private static final long REDDIT_BUBBLE_PENDING_INTENT_SPACING_MS = 350L;
+    private static final long REDDIT_BUBBLE_PENDING_INTENT_FINISH_DELAY_MS = 500L;
     private static View sSecondRow;
     private static final Set<String> sActivityIntentDiagnosticPackages = ConcurrentHashMap.newKeySet();
     private static final Set<String> sRedditDeepLinkDiagnosticPackages = ConcurrentHashMap.newKeySet();
@@ -4042,18 +4043,26 @@ public class MoreBubbleHookModule extends XposedModule {
             if (getBounds != null) getBounds.invoke(pending.taskView, launchBounds);
             if (launchBounds.isEmpty()) launchBounds = null;
 
-            if (!startPendingIntentInTaskView(pending.context, pending.taskView, request.pendingIntent,
-                    null, options, launchBounds)) {
+            Intent fillInIntent = new Intent();
+            fillInIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT
+                    | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+            if (!startPendingIntentInTaskView(pending.context, pending.taskView,
+                    request.pendingIntent, fillInIntent, options, launchBounds)) {
                 throw new IllegalStateException("TaskView startActivity unavailable");
             }
-            logDetailedInfo(pending.context, "Reddit notification PendingIntent delivered to "
-                    + "Bubble TaskView taskId=" + pending.taskId);
-            try {
-                request.onStarted.run();
-            } catch (Throwable t) {
-                Log.w(TAG, "Reddit Bubble notification completion failed: "
-                        + t.getClass().getSimpleName());
-            }
+            logDetailedInfo(pending.context, "Reddit notification PendingIntent start request queued to "
+                    + "Bubble TaskView taskId=" + pending.taskId
+                    + " fillInFlags=0x"
+                    + Integer.toHexString(Intent.FLAG_ACTIVITY_NEW_DOCUMENT
+                    | Intent.FLAG_ACTIVITY_MULTIPLE_TASK));
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                try {
+                    request.onStarted.run();
+                } catch (Throwable t) {
+                    Log.w(TAG, "Reddit Bubble notification completion failed: "
+                            + t.getClass().getSimpleName());
+                }
+            }, REDDIT_BUBBLE_PENDING_INTENT_FINISH_DELAY_MS);
             pending.deliveryScheduled.set(false);
             if (pending.requests.isEmpty()) {
                 sPendingRedditBubbleLaunches.remove(pending.bubbleKey, pending);
