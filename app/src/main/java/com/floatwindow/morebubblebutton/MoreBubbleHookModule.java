@@ -9,6 +9,7 @@ import android.annotation.SuppressLint;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -43,6 +44,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
@@ -51,6 +53,8 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 
 public class MoreBubbleHookModule extends XposedModule {
     private static final String TAG = "MoreBubbleModule";
+    private static final String REDDIT_AUTHENTICATOR_SERVICE =
+            "com.reddit.auth.login.impl.AuthService";
     private static View sSecondRow;
     private static final Set<String> sActivityIntentDiagnosticPackages = ConcurrentHashMap.newKeySet();
     private static final Map<String, Long> sActivityDiagnosticHookTimes = new ConcurrentHashMap<>();
@@ -3573,7 +3577,7 @@ public class MoreBubbleHookModule extends XposedModule {
             };
             if (upstreamCompatibility && "com.reddit.frontpage".equals(pkg)) {
                 runOnSysuiMain(bubblesManager, () -> warmRedditBeforeBubble(
-                        ctx, user, launchUserId, launchIntent, submit));
+                        ctx, user, submit));
             } else if (execute != null) {
                 execute.invoke(executor, work);
             } else {
@@ -3586,54 +3590,100 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    private static void warmRedditBeforeBubble(Context context, UserHandle user, int userId,
-            Intent launcher, Runnable openBubble) {
-        if (context == null || launcher == null || hasRunningRedditTask(context, userId)) {
+    private static void warmRedditBeforeBubble(Context context, UserHandle user,
+            Runnable openBubble) {
+        if (context == null || user == null) {
             openBubble.run();
             return;
         }
-        try {
-            Method start = findMethodSystemUi(context.getClass(), "startActivityAsUser",
-                    Intent.class, android.os.Bundle.class, UserHandle.class);
-            if (start == null) throw new NoSuchMethodException("startActivityAsUser");
-            Intent warmup = new Intent(launcher).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                    | Intent.FLAG_ACTIVITY_NEW_DOCUMENT | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
-            ActivityOptions options = ActivityOptions.makeTaskLaunchBehind();
-            start.invoke(context, warmup, options.toBundle(), user);
-            Log.i(TAG, "Reddit Bubble compatibility: requested background warmup");
-        } catch (Exception e) {
-            Log.w(TAG, "Reddit Bubble compatibility: background warmup unavailable", e);
-            openBubble.run();
-            return;
-        }
-        Handler handler = new Handler(Looper.getMainLooper());
-        long deadline = SystemClock.uptimeMillis() + 1800L;
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                boolean ready = hasRunningRedditTask(context, userId);
-                if (!ready && SystemClock.uptimeMillis() < deadline) {
-                    handler.postDelayed(this, 150L);
+
+        // Reddit's notification entry point and RedditDeepLinkActivity do not declare
+        // separate processes. Binding this exported account-authenticator Service starts
+        // the same default app process without launching its launcher Activity or creating
+        // a regular task before the Bubble request.
+        AtomicBoolean completed = new AtomicBoolean(false);
+        AtomicBoolean bound = new AtomicBoolean(false);
+        ServiceConnection connection = new ServiceConnection() {
+            private void continueWithBubble(String result) {
+                if (!completed.compareAndSet(false, true)) {
+                    unbindRedditWarmupService(context, this, bound);
                     return;
                 }
-                Log.i(TAG, "Reddit Bubble compatibility: warmup "
-                        + (ready ? "task ready" : "timed out") + "; submitting Bubble");
+                logDetailedInfo(context, "Reddit Bubble compatibility: process warmup " + result);
+                unbindRedditWarmupService(context, this, bound);
                 openBubble.run();
             }
-        }, 250L);
+
+            @Override
+            public void onServiceConnected(ComponentName name, IBinder service) {
+                continueWithBubble("service connected");
+            }
+
+            @Override
+            public void onServiceDisconnected(ComponentName name) {
+                // The normal path unbinds immediately after connection; no action needed.
+            }
+
+            @Override
+            public void onBindingDied(ComponentName name) {
+                continueWithBubble("binding died; continuing");
+            }
+
+            @Override
+            public void onNullBinding(ComponentName name) {
+                continueWithBubble("null binding; process started");
+            }
+        };
+
+        try {
+            Method bind = findMethodSystemUi(context.getClass(), "bindServiceAsUser",
+                    Intent.class, ServiceConnection.class, int.class, UserHandle.class);
+            if (bind == null) throw new NoSuchMethodException("bindServiceAsUser");
+            Intent serviceIntent = new Intent("android.accounts.AccountAuthenticator")
+                    .setComponent(new ComponentName("com.reddit.frontpage",
+                            REDDIT_AUTHENTICATOR_SERVICE));
+            boolean accepted = (boolean) bind.invoke(context, serviceIntent, connection,
+                    Context.BIND_AUTO_CREATE, user);
+            if (!accepted) {
+                if (completed.compareAndSet(false, true)) {
+                    Log.w(TAG, "Reddit Bubble compatibility: process warmup bind rejected; "
+                            + "continuing with Bubble");
+                    openBubble.run();
+                }
+                return;
+            }
+            bound.set(true);
+            logDetailedInfo(context,
+                    "Reddit Bubble compatibility: requested process-only warmup");
+        } catch (Throwable e) {
+            if (completed.compareAndSet(false, true)) {
+                Log.w(TAG, "Reddit Bubble compatibility: process warmup unavailable; "
+                        + "continuing with Bubble", e);
+                unbindRedditWarmupService(context, connection, bound);
+                openBubble.run();
+            }
+            return;
+        }
+
+        Handler handler = new Handler(Looper.getMainLooper());
+        handler.postDelayed(() -> {
+            if (!completed.compareAndSet(false, true)) return;
+            Log.w(TAG, "Reddit Bubble compatibility: process warmup timed out; "
+                    + "continuing with Bubble");
+            unbindRedditWarmupService(context, connection, bound);
+            openBubble.run();
+        }, 1800L);
     }
 
-    private static boolean hasRunningRedditTask(Context context, int userId) {
-        List<?> tasks = getRunningTasks(context);
-        if (tasks == null) return false;
-        for (Object task : tasks) {
-            NotificationTaskSnapshot snapshot = readNotificationTaskSnapshot(task);
-            if (snapshot != null && snapshot.userId == userId
-                    && "com.reddit.frontpage".equals(snapshot.packageName())
-                    && Boolean.TRUE.equals(getFieldSystemUi(task, "isRunning"))
-                    && !Boolean.TRUE.equals(getFieldSystemUi(task, "isAppBubble"))) return true;
+    private static void unbindRedditWarmupService(Context context, ServiceConnection connection,
+            AtomicBoolean bound) {
+        if (!bound.compareAndSet(true, false)) return;
+        try {
+            context.unbindService(connection);
+        } catch (Throwable t) {
+            Log.w(TAG, "Reddit Bubble compatibility: warmup service unbind failed: "
+                    + t.getClass().getSimpleName());
         }
-        return false;
     }
 
     /** Shared module Bubble route for notifications not delegated to native SystemUI. */
