@@ -16,6 +16,7 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Handler;
 import android.os.Looper;
@@ -37,6 +38,7 @@ import android.widget.Toast;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -4040,7 +4042,7 @@ public class MoreBubbleHookModule extends XposedModule {
             if (getBounds != null) getBounds.invoke(pending.taskView, launchBounds);
             if (launchBounds.isEmpty()) launchBounds = null;
 
-            if (!startPendingIntentInTaskView(pending.taskView, request.pendingIntent,
+            if (!startPendingIntentInTaskView(pending.context, pending.taskView, request.pendingIntent,
                     null, options, launchBounds)) {
                 throw new IllegalStateException("TaskView startActivity unavailable");
             }
@@ -4063,8 +4065,12 @@ public class MoreBubbleHookModule extends XposedModule {
             sPendingRedditBubbleLaunches.remove(pending.bubbleKey, pending);
             pending.requests.clear();
             pending.deliveryScheduled.set(false);
+            Throwable failure = t instanceof java.lang.reflect.InvocationTargetException
+                    && t.getCause() != null ? t.getCause() : t;
+            logDetailedInfo(pending.context, "Reddit compatibility Bubble TaskView delivery failed="
+                    + failure.getClass().getSimpleName());
             Log.w(TAG, "Reddit compatibility Bubble TaskView delivery failed: "
-                    + t.getClass().getSimpleName());
+                    + failure.getClass().getSimpleName());
         }
     }
 
@@ -4226,7 +4232,7 @@ public class MoreBubbleHookModule extends XposedModule {
             if (getBounds != null) getBounds.invoke(taskView, launchBounds);
             if (launchBounds.isEmpty()) launchBounds = null;
 
-            if (!startPendingIntentInTaskView(taskView, notificationPendingIntent,
+            if (!startPendingIntentInTaskView(context, taskView, notificationPendingIntent,
                     null, options, launchBounds)) {
                 logDetailedInfo(context, reason + ": existing Bubble TaskView startActivity API unavailable"
                         + " taskViewClass=" + taskView.getClass().getName());
@@ -4249,48 +4255,170 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    private static boolean startPendingIntentInTaskView(Object taskView,
+    private static boolean startPendingIntentInTaskView(Context context, Object taskView,
             PendingIntent pendingIntent, Intent fillInIntent,
             ActivityOptions options, Rect launchBounds) throws Exception {
         if (taskView == null || pendingIntent == null || options == null) return false;
-        Method fourArgumentMethod = null;
-        Method threeArgumentMethod = null;
-        Method twoArgumentMethod = null;
-        for (Class<?> type = taskView.getClass(); type != null;
-                type = type.getSuperclass()) {
+        Method selected = findTaskViewPendingIntentStartMethod(taskView);
+        Object target = taskView;
+        if (selected == null) {
+            Object taskViewController = getFieldSystemUi(taskView, "mTaskViewController");
+            Object taskViewTaskController = getFieldSystemUi(taskView, "mTaskViewTaskController");
+            Method controllerMethod = findTaskViewControllerStartMethod(
+                    taskViewController, taskViewTaskController);
+            if (controllerMethod != null) {
+                Class<?>[] parameters = controllerMethod.getParameterTypes();
+                controllerMethod.setAccessible(true);
+                logDetailedInfo(context, "TaskView PendingIntent start API selected target="
+                        + taskViewController.getClass().getName() + " signature="
+                        + describeTaskViewPendingIntentStartMethod(controllerMethod));
+                controllerMethod.invoke(taskViewController, taskViewTaskController,
+                        pendingIntent, fillInIntent,
+                        taskViewOptionsArgument(parameters[3], options), launchBounds);
+                return true;
+            }
+        }
+        if (selected == null) {
+            Object taskViewController = getFieldSystemUi(taskView, "mTaskViewController");
+            Object taskViewTaskController = getFieldSystemUi(taskView,
+                    "mTaskViewTaskController");
+            logDetailedInfo(context, "TaskView PendingIntent start API unavailable taskViewClass="
+                    + taskView.getClass().getName() + " taskViewCandidates="
+                    + describeTaskViewPendingIntentStartMethods(taskView)
+                    + " controllerCandidates="
+                    + describeTaskViewPendingIntentStartMethods(taskViewController)
+                    + " taskControllerCandidates="
+                    + describeTaskViewPendingIntentStartMethods(taskViewTaskController));
+            return false;
+        }
+        selected.setAccessible(true);
+        Class<?>[] parameters = selected.getParameterTypes();
+        logDetailedInfo(context, "TaskView PendingIntent start API selected target="
+                + target.getClass().getName() + " signature="
+                + describeTaskViewPendingIntentStartMethod(selected));
+        if (parameters.length == 4) {
+            Object optionsArgument = taskViewOptionsArgument(parameters[2], options);
+            selected.invoke(target, pendingIntent, fillInIntent, optionsArgument, launchBounds);
+        } else if (parameters.length == 3) {
+            if (Intent.class.isAssignableFrom(parameters[1])) {
+                selected.invoke(target, pendingIntent, fillInIntent,
+                        taskViewOptionsArgument(parameters[2], options));
+            } else {
+                selected.invoke(target, pendingIntent,
+                        taskViewOptionsArgument(parameters[1], options), launchBounds);
+            }
+        } else if (parameters.length == 2) {
+            selected.invoke(target, pendingIntent,
+                    taskViewOptionsArgument(parameters[1], options));
+        } else {
+            selected.invoke(target, pendingIntent);
+        }
+        return true;
+    }
+
+    private static Method findTaskViewPendingIntentStartMethod(Object target) {
+        if (target == null) return null;
+        Method selected = null;
+        int selectedScore = 0;
+        for (Method method : taskViewStartMethods(target)) {
+            int score = taskViewPendingIntentStartMethodScore(method.getParameterTypes());
+            if (score > selectedScore) {
+                selected = method;
+                selectedScore = score;
+            }
+        }
+        return selected;
+    }
+
+    private static Method findTaskViewControllerStartMethod(Object controller,
+            Object taskViewTaskController) {
+        if (controller == null || taskViewTaskController == null) return null;
+        Method selected = null;
+        int selectedScore = 0;
+        for (Method method : taskViewStartMethods(controller)) {
+            Class<?>[] parameters = method.getParameterTypes();
+            if (!"startActivity".equals(method.getName()) || parameters.length != 5
+                    || !parameters[0].isInstance(taskViewTaskController)
+                    || !PendingIntent.class.isAssignableFrom(parameters[1])
+                    || !Intent.class.isAssignableFrom(parameters[2])
+                    || !isTaskViewOptionsType(parameters[3])
+                    || !Rect.class.isAssignableFrom(parameters[4])) continue;
+            int score = Bundle.class.isAssignableFrom(parameters[3]) ? 1 : 2;
+            if (score > selectedScore) {
+                selected = method;
+                selectedScore = score;
+            }
+        }
+        return selected;
+    }
+
+    private static ArrayList<Method> taskViewStartMethods(Object target) {
+        ArrayList<Method> methods = new ArrayList<>();
+        if (target == null) return methods;
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
             for (Method method : type.getDeclaredMethods()) {
-                if (!method.getName().equals("startActivity")) continue;
-                Class<?>[] parameters = method.getParameterTypes();
-                if (parameters.length >= 3
-                        && PendingIntent.class.isAssignableFrom(parameters[0])
-                        && Intent.class.isAssignableFrom(parameters[1])
-                        && ActivityOptions.class.isAssignableFrom(parameters[2])) {
-                    if (parameters.length == 4 && Rect.class.isAssignableFrom(parameters[3])) {
-                        fourArgumentMethod = method;
-                    } else if (parameters.length == 3) {
-                        threeArgumentMethod = method;
-                    }
-                } else if (parameters.length == 2
-                        && PendingIntent.class.isAssignableFrom(parameters[0])
-                        && ActivityOptions.class.isAssignableFrom(parameters[1])) {
-                    twoArgumentMethod = method;
+                if ("startActivity".equals(method.getName()) && !methods.contains(method)) {
+                    methods.add(method);
                 }
             }
         }
-
-        Method selected = fourArgumentMethod != null ? fourArgumentMethod
-                : (threeArgumentMethod != null ? threeArgumentMethod : twoArgumentMethod);
-        if (selected == null) return false;
-        selected.setAccessible(true);
-        Class<?>[] parameters = selected.getParameterTypes();
-        if (parameters.length == 4) {
-            selected.invoke(taskView, pendingIntent, fillInIntent, options, launchBounds);
-        } else if (parameters.length == 3) {
-            selected.invoke(taskView, pendingIntent, fillInIntent, options);
-        } else {
-            selected.invoke(taskView, pendingIntent, options);
+        for (Method method : target.getClass().getMethods()) {
+            if ("startActivity".equals(method.getName()) && !methods.contains(method)) {
+                methods.add(method);
+            }
         }
-        return true;
+        return methods;
+    }
+
+    private static int taskViewPendingIntentStartMethodScore(Class<?>[] parameters) {
+        if (parameters.length == 0
+                || !PendingIntent.class.isAssignableFrom(parameters[0])) return 0;
+        if (parameters.length == 4 && Intent.class.isAssignableFrom(parameters[1])
+                && isTaskViewOptionsType(parameters[2])
+                && Rect.class.isAssignableFrom(parameters[3])) {
+            return Bundle.class.isAssignableFrom(parameters[2]) ? 35 : 40;
+        }
+        if (parameters.length == 3 && Intent.class.isAssignableFrom(parameters[1])
+                && isTaskViewOptionsType(parameters[2])) {
+            return Bundle.class.isAssignableFrom(parameters[2]) ? 25 : 30;
+        }
+        if (parameters.length == 3 && isTaskViewOptionsType(parameters[1])
+                && Rect.class.isAssignableFrom(parameters[2])) {
+            return Bundle.class.isAssignableFrom(parameters[1]) ? 24 : 29;
+        }
+        if (parameters.length == 2 && isTaskViewOptionsType(parameters[1])) {
+            return Bundle.class.isAssignableFrom(parameters[1]) ? 15 : 20;
+        }
+        if (parameters.length == 1) return 10;
+        return 0;
+    }
+
+    private static boolean isTaskViewOptionsType(Class<?> type) {
+        return ActivityOptions.class.isAssignableFrom(type)
+                || Bundle.class.isAssignableFrom(type);
+    }
+
+    private static Object taskViewOptionsArgument(Class<?> parameterType,
+            ActivityOptions options) {
+        return Bundle.class.isAssignableFrom(parameterType) ? options.toBundle() : options;
+    }
+
+    private static String describeTaskViewPendingIntentStartMethods(Object target) {
+        if (target == null) return "controller-unavailable";
+        ArrayList<String> signatures = new ArrayList<>();
+        for (Method method : taskViewStartMethods(target)) {
+            String signature = describeTaskViewPendingIntentStartMethod(method);
+            if (!signatures.contains(signature)) signatures.add(signature);
+        }
+        return signatures.isEmpty() ? "none" : String.join("|", signatures);
+    }
+
+    private static String describeTaskViewPendingIntentStartMethod(Method method) {
+        ArrayList<String> parameterNames = new ArrayList<>();
+        for (Class<?> parameter : method.getParameterTypes()) {
+            parameterNames.add(parameter.getName());
+        }
+        return method.getName() + "(" + String.join(",", parameterNames) + ")";
     }
 
     /**
