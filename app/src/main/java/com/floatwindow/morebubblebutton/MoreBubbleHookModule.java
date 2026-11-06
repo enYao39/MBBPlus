@@ -10,6 +10,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -3872,11 +3873,15 @@ public class MoreBubbleHookModule extends XposedModule {
                     + t.getClass().getSimpleName());
             return false;
         }
-        if (seedIntent == null || !isRedditMainActivity(seedIntent.getComponent())) {
+        String launcherTargetActivity = resolveRedditLauncherTargetActivity(context, seedIntent);
+        if (seedIntent == null || !REDDIT_MAIN_ACTIVITY.equals(launcherTargetActivity)) {
             logDetailedInfo(context, reason + ": Reddit Bubble seed unavailable; launcher target="
-                    + flattenComponent(seedIntent != null ? seedIntent.getComponent() : null));
+                    + flattenComponent(seedIntent != null ? seedIntent.getComponent() : null)
+                    + " resolvedActivity=" + launcherTargetActivity);
             return false;
         }
+        logDetailedInfo(context, reason + ": Reddit Bubble launcher target resolved to MainActivity; "
+                + "launcher=" + flattenComponent(seedIntent.getComponent()));
         seedIntent = new Intent(seedIntent);
         seedIntent.setPackage(REDDIT_PACKAGE);
         seedIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
@@ -3913,6 +3918,30 @@ public class MoreBubbleHookModule extends XposedModule {
         logDetailedInfo(context, reason + ": Reddit MainActivity Bubble seed submitted; "
                 + "waiting for TaskView task creation");
         return true;
+    }
+
+    /**
+     * Reddit exposes its launch entry point as an activity-alias on Lunaris. Resolve the alias
+     * through ActivityInfo.targetActivity so the launcher Intent can seed the Bubble while the
+     * TaskView callback still verifies that the created task is Reddit's real MainActivity.
+     */
+    private static String resolveRedditLauncherTargetActivity(Context context, Intent launchIntent) {
+        ComponentName component = launchIntent != null ? launchIntent.getComponent() : null;
+        if (component == null || !REDDIT_PACKAGE.equals(component.getPackageName())) return null;
+        if (isRedditMainActivity(component)) return REDDIT_MAIN_ACTIVITY;
+        try {
+            ActivityInfo activityInfo = context.getPackageManager().getActivityInfo(component, 0);
+            String targetActivity = activityInfo.targetActivity;
+            if (targetActivity == null || targetActivity.isEmpty()) return component.getClassName();
+            if (targetActivity.startsWith(".")) {
+                targetActivity = activityInfo.packageName + targetActivity;
+            } else if (!targetActivity.contains(".")) {
+                targetActivity = activityInfo.packageName + "." + targetActivity;
+            }
+            return targetActivity;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static String getAppBubbleKey(Object controller, String packageName, UserHandle user) {
