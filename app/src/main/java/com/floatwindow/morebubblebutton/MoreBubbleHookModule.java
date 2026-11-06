@@ -171,9 +171,17 @@ public class MoreBubbleHookModule extends XposedModule {
                                         + describeAtmsTask(activityTask(
                                                 getFieldSystemUi(receiver, "mCandidateRecord")))
                                         + " includeBubble=" + getFieldSystemUi(receiver,
-                                                "mIncludeLaunchedFromBubble"));
+                                                "mIncludeLaunchedFromBubble")
+                                        + " " + describeAtmsCandidate(receiver, candidate));
                             } else if ("findTask".equals(name)) {
-                                logAtmsTrace(id, "findTask selected=" + describeAtmsTask(activityTask(result)));
+                                String includeBubble = "unavailable";
+                                for (int i = 0; i < method.getParameterCount(); i++) {
+                                    if (method.getParameterTypes()[i] == boolean.class) {
+                                        includeBubble = String.valueOf(chain.getArg(i));
+                                    }
+                                }
+                                logAtmsTrace(id, "findTask includeBubbleArg=" + includeBubble
+                                        + " selected=" + describeAtmsTask(activityTask(result)));
                             } else {
                                 Object task = "computeTargetTask".equals(name) ? result
                                         : "setNewTask".equals(name)
@@ -210,6 +218,46 @@ public class MoreBubbleHookModule extends XposedModule {
 
     private static Object activityTask(Object activity) {
         return invokeSystemUi(activity, "getTask");
+    }
+
+    private static String describeAtmsCandidate(Object finder, Object task) {
+        try {
+            Object included = getAtmsTopActivity(task, true);
+            Object excluded = getAtmsTopActivity(task, false);
+            Object taskAffinity = getFieldSystemUi(task, "rootAffinity");
+            Object targetAffinity = getFieldSystemUi(finder, "mTaskAffinity");
+            Object targetComponent = getFieldSystemUi(finder, "cls");
+            Object taskComponent = getFieldSystemUi(task, "realActivity");
+            return "topWithBubble=" + describeAtmsActivity(included)
+                    + " topWithoutBubble=" + describeAtmsActivity(excluded)
+                    + " componentMatches=" + java.util.Objects.equals(targetComponent, taskComponent)
+                    + " affinityMatches=" + (taskAffinity != null
+                    && taskAffinity.equals(targetAffinity))
+                    + " targetUser=" + taskDiagnosticField(finder, "userId")
+                    + " targetActivityType=" + taskDiagnosticField(finder, "mActivityType")
+                    + " taskActivityType=" + invokeSystemUi(task, "getActivityType");
+        } catch (Throwable t) {
+            return "candidateDetails=unavailable:" + t.getClass().getSimpleName();
+        }
+    }
+
+    private static Object getAtmsTopActivity(Object task, boolean includeBubble) throws Exception {
+        Method method = findMethodSystemUi(task.getClass(), "getTopNonFinishingActivity",
+                boolean.class, boolean.class);
+        if (method == null) throw new NoSuchMethodException("getTopNonFinishingActivity");
+        return method.invoke(task, false, includeBubble);
+    }
+
+    private static String describeAtmsActivity(Object activity) {
+        if (activity == null) return "none";
+        Object value = getFieldSystemUi(activity, "intent");
+        ComponentName component = value instanceof Intent intent ? intent.getComponent() : null;
+        return "{component=" + flattenComponent(component)
+                + ",finishing=" + taskDiagnosticField(activity, "finishing")
+                + ",overlay=" + invokeSystemUi(activity, "isTaskOverlay")
+                + ",launchedFromBubble=" + invokeSystemUi(activity, "getLaunchedFromBubble")
+                + ",userId=" + taskDiagnosticField(activity, "mUserId")
+                + ",launchMode=" + taskDiagnosticField(activity, "launchMode") + "}";
     }
 
     private static String describeAtmsTask(Object task) {
