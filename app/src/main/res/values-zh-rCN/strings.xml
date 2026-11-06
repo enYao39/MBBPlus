@@ -112,4 +112,5 @@
     <string name="app_icon_description">更多消息气泡图标</string>
     <string name="freeform_label">自由窗口</string>
     <string name="freeform_unavailable">自由窗口不可用，已改用 Bubble。</string>
+    <string name="notification_fullscreen_failed">无法打开此通知。</string>
 </resources>

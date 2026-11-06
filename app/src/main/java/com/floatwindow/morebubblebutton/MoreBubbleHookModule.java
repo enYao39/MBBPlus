@@ -3381,18 +3381,35 @@ public class MoreBubbleHookModule extends XposedModule {
         try {
             Notification notification = sbn != null
                     ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
-            if (notification == null || notification.contentIntent == null) return false;
+            if (notification == null || notification.contentIntent == null) {
+                Log.w(TAG, reason + ": fullscreen PendingIntent unavailable");
+                showNotificationFullscreenFailure();
+                return false;
+            }
             ActivityOptions options = ActivityOptions.makeBasic();
             setPendingIntentBackgroundStartAllowed(options);
             notification.contentIntent.send(options.toBundle());
-            Log.i(TAG, reason + ": launched notification PendingIntent fullscreen");
+            Log.i(TAG, reason + ": sent fullscreen notification PendingIntent request");
             return true;
         } catch (PendingIntent.CanceledException e) {
             Log.w(TAG, reason + ": fullscreen PendingIntent canceled");
         } catch (Throwable t) {
             Log.w(TAG, reason + ": fullscreen launch failed: " + t.getMessage());
         }
+        showNotificationFullscreenFailure();
         return false;
+    }
+
+    private static void showNotificationFullscreenFailure() {
+        Context context = getBubblesManagerContext(sBubblesManager);
+        if (context == null) return;
+        try {
+            Context module = context.createPackageContext(
+                    "com.floatwindow.morebubblebutton", Context.CONTEXT_IGNORE_SECURITY);
+            showToast(context, module.getString(R.string.notification_fullscreen_failed));
+        } catch (Exception e) {
+            Log.w(TAG, "Unable to show notification launch failure", e);
+        }
     }
 
     private static int dp(Context ctx, long value) {
@@ -3593,6 +3610,7 @@ public class MoreBubbleHookModule extends XposedModule {
         final String reason;
         final Object bubblesManager;
         final Object entry;
+        final NativeNotificationBubbleState initialState;
         final long startedAt = SystemClock.elapsedRealtime();
         int retryIndex;
         boolean verificationStarted;
@@ -3603,6 +3621,7 @@ public class MoreBubbleHookModule extends XposedModule {
             this.reason = reason;
             this.bubblesManager = bubblesManager;
             this.entry = entry;
+            this.initialState = readNativeNotificationBubbleState(bubblesManager, key);
         }
     }
 
@@ -3672,7 +3691,10 @@ public class MoreBubbleHookModule extends XposedModule {
                 || sPendingNativeNotificationBubbles.get(pending.key) != pending) return;
         NativeNotificationBubbleState state = readNativeNotificationBubbleState(
                 pending.bubblesManager, pending.key);
-        if (state.isReady()) {
+        boolean unchangedReadyState = pending.initialState.isReady()
+                && pending.initialState.bubble == state.bubble
+                && pending.initialState.taskId == state.taskId;
+        if (state.isReady() && !unchangedReadyState) {
             sPendingNativeNotificationBubbles.remove(pending.key, pending);
             Context context = getBubblesManagerContext(pending.bubblesManager);
             logDetailedInfo(context, pending.reason
@@ -3687,7 +3709,8 @@ public class MoreBubbleHookModule extends XposedModule {
                     () -> verifyNativeNotificationBubble(pending), delay);
             return;
         }
-        fallbackNativeNotificationBubble(pending, state.status);
+        fallbackNativeNotificationBubble(pending,
+                state.isReady() && unchangedReadyState ? "already-expanded-before-click" : state.status);
     }
 
     private static NativeNotificationBubbleState readNativeNotificationBubbleState(
@@ -3934,7 +3957,7 @@ public class MoreBubbleHookModule extends XposedModule {
                     + " launchFallback=" + usingLaunchFallback
                     + " target=" + summarizeIntent(targetIntent));
             logIntentDetails(ctx, reason + ": Bubble target intent", targetIntent);
-            if (targetIntent == null || launchIntent == null) {
+            if (targetIntent == null) {
                 Log.w(TAG, reason + ": skip app bubble, no target intent for " + pkg);
                 collapseShadeFromManager(bubblesManager);
                 return launchNotificationFullscreen(entry, reason);

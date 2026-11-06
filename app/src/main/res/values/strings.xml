@@ -112,4 +112,5 @@
     <string name="app_icon_description">MoreBubbleButton icon</string>
     <string name="freeform_label">Freeform</string>
     <string name="freeform_unavailable">Freeform is unavailable; using Bubble instead.</string>
+    <string name="notification_fullscreen_failed">Could not open this notification.</string>
 </resources>
