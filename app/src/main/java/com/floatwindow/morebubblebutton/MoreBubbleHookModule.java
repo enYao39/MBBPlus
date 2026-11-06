@@ -3380,7 +3380,9 @@ public class MoreBubbleHookModule extends XposedModule {
             Notification notification = sbn != null
                     ? (Notification) invokeSystemUi(sbn, "getNotification") : null;
             if (notification == null || notification.contentIntent == null) return false;
-            notification.contentIntent.send();
+            ActivityOptions options = ActivityOptions.makeBasic();
+            setPendingIntentBackgroundStartAllowed(options);
+            notification.contentIntent.send(options.toBundle());
             Log.i(TAG, reason + ": launched notification PendingIntent fullscreen");
             return true;
         } catch (PendingIntent.CanceledException e) {
