@@ -957,12 +957,17 @@ public class MoreBubbleHookModule extends XposedModule {
                 "android.window.WindowContainerTransaction", "sendPendingIntent");
         int directSendHooks = hookBubblePendingIntentOptions(cl,
                 "android.app.PendingIntent", "send");
+        int factoryHooks = hookBubblePendingIntentOptions(cl,
+                "android.app.PendingIntent", "getActivityAsUser");
+        int transitionStartHooks = hookBubblePendingIntentOptions(cl,
+                "com.android.wm.shell.taskview.TaskViewTransitions", "startActivity");
 
         Log.i(TAG, "Bubble task diagnostics hooks organizer=" + organizerHooks
                 + " helperListener=" + bubbleListenerHooks
                 + " taskViewListener=" + taskViewListenerHooks
                 + " taskViewStart=" + taskViewStartHooks
-                + " transactionSend=" + transactionHooks + " directSend=" + directSendHooks);
+                + " transactionSend=" + transactionHooks + " directSend=" + directSendHooks
+                + " activityFactory=" + factoryHooks + " transitionStart=" + transitionStartHooks);
     }
 
     /** Hook the newer BubbleTaskView listener API used by Lunaris AOSP 3.12. */
@@ -1157,7 +1162,7 @@ public class MoreBubbleHookModule extends XposedModule {
         return installed;
     }
 
-    /** Observe both transition requests and direct sends from the Shell process. */
+    /** Observe launch options at the Shell entry points that construct or submit them. */
     private int hookBubblePendingIntentOptions(ClassLoader loader, String className,
             String methodName) {
         int installed = 0;
@@ -1165,16 +1170,24 @@ public class MoreBubbleHookModule extends XposedModule {
             Class<?> owner = loader.loadClass(className);
             for (Method method : owner.getDeclaredMethods()) {
                 Class<?>[] parameters = method.getParameterTypes();
-                int optionsIndex = java.util.Arrays.asList(parameters)
-                        .indexOf(android.os.Bundle.class);
+                java.util.List<Class<?>> types = java.util.Arrays.asList(parameters);
+                int bundleIndex = types.indexOf(android.os.Bundle.class);
+                int optionsIndex = bundleIndex >= 0 ? bundleIndex : types.indexOf(ActivityOptions.class);
                 if (!methodName.equals(method.getName()) || optionsIndex < 0) continue;
-                boolean direct = owner == PendingIntent.class;
-                if (!direct && parameters[0] != PendingIntent.class) continue;
+                int senderIndex = types.indexOf(PendingIntent.class);
+                int intentIndex = types.indexOf(Intent.class);
+                boolean factory = "getActivityAsUser".equals(methodName);
+                boolean direct = "send".equals(methodName);
+                if (factory && intentIndex < 0 || !factory && !direct && senderIndex < 0) continue;
                 method.setAccessible(true);
                 hook(method).intercept(chain -> {
+                    if (sBubbleTaskDiagnosticPackages.isEmpty()) return chain.proceed();
                     try {
                         Object value = chain.getArg(optionsIndex);
-                        if (value instanceof android.os.Bundle options
+                        android.os.Bundle options = value instanceof android.os.Bundle bundle
+                                ? bundle : value instanceof ActivityOptions activityOptions
+                                ? activityOptions.toBundle() : null;
+                        if (options != null
                                 && (options.containsKey("android.activity.launchNextToBubble")
                                 || options.containsKey("android.activity.launchRootTaskToken")
                                 || options.containsKey("android.activity.launchCookie"))
@@ -1184,13 +1197,19 @@ public class MoreBubbleHookModule extends XposedModule {
                                 if (isBubbleTaskDiagnosticActive(pkg)) activePackages.add(pkg);
                             }
                             if (!activePackages.isEmpty()) {
-                                Object sender = direct ? chain.getThisObject() : chain.getArg(0);
+                                Object sender = direct ? chain.getThisObject()
+                                        : senderIndex >= 0 ? chain.getArg(senderIndex) : null;
                                 String creator = sender instanceof PendingIntent pending
                                         ? safePendingIntentCreator(pending) : "unknown";
+                                Intent target = factory && chain.getArg(intentIndex) instanceof Intent intent
+                                        ? intent : null;
                                 Log.i(TAG, "Bubble Shell PendingIntent options"
                                         + " entry=" + owner.getSimpleName() + "." + methodName
                                         + " activePackages=" + activePackages
                                         + " pendingIntentCreator=" + creator
+                                        + (target == null ? "" : " targetPackage="
+                                        + (target.getComponent() == null ? target.getPackage()
+                                        : target.getComponent().getPackageName()))
                                         + describeBubbleLaunchBundle(options, loader));
                             }
                         }
