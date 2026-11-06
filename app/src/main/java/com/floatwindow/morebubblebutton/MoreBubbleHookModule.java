@@ -3495,6 +3495,7 @@ public class MoreBubbleHookModule extends XposedModule {
                     if (useUpstreamCompatibilityRoute) {
                         logDetailedInfo(ctx, reason + ": using upstream-compatible Bubble route for " + pkg);
                         if (launchNotificationViaUpstreamBubblePath(controller, finalIntent,
+                                notif != null ? notif.contentIntent : null,
                                 finalUser, entryPoint, pkg, reason)) {
                             runOnSysuiMain(bubblesManager,
                                     () -> dismissClickedNotificationIfAutoCancel(bubblesManager, entry));
@@ -3550,42 +3551,82 @@ public class MoreBubbleHookModule extends XposedModule {
 
     /** Invoke the upstream notification Bubble path, bypassing local TaskView/overflow routing. */
     private static boolean launchNotificationViaUpstreamBubblePath(Object controller,
-            Intent intent, UserHandle user, Object entryPoint, String packageName, String reason) {
+            Intent intent, PendingIntent notificationPendingIntent, UserHandle user,
+            Object entryPoint, String packageName, String reason) {
         Method expand = findLegacyAppBubbleExpandMethod(controller, entryPoint);
-        if (expand == null) {
-            logDetailedInfo((Context) getFieldSystemUi(controller, "mContext"), reason
-                    + ": upstream-compatible BubbleController API unavailable");
-            return false;
+        Object launchArgument = intent;
+        String apiVariant = "Intent";
+        if (expand == null && notificationPendingIntent != null) {
+            // Lunaris API 36 exposes the upstream controller route with the notification's
+            // PendingIntent instead of an extracted Intent. This preserves its sender identity
+            // and follows BubbleController's own TYPE_APP construction path.
+            expand = findPendingIntentAppBubbleExpandMethod(controller, entryPoint);
+            if (expand != null) {
+                launchArgument = notificationPendingIntent;
+                apiVariant = "PendingIntent";
+            }
         }
         Context context = (Context) getFieldSystemUi(controller, "mContext");
-        try {
-            expand.invoke(controller, intent, user, entryPoint, null);
-            Log.i(TAG, reason + ": expanded app Bubble through upstream-compatible API for "
-                    + packageName + " target=" + summarizeIntent(intent));
-            scheduleBubbleTaskSnapshots(context, packageName, reason, "upstream-compat",
-                    controller, null, intent);
-            return true;
-        } catch (Throwable t) {
-            logDetailedInfo(context, reason + ": upstream-compatible Bubble launch failed="
-                    + t.getClass().getSimpleName());
-            Log.w(TAG, reason + ": upstream-compatible Bubble launch failed: " + t.getMessage());
-            return false;
+        if (expand != null) {
+            try {
+                expand.invoke(controller, launchArgument, user, entryPoint, null);
+                logDetailedInfo(context, reason + ": resolved upstream BubbleController API="
+                        + expand.toGenericString());
+                Log.i(TAG, reason + ": expanded app Bubble through upstream-compatible "
+                        + apiVariant + " API for " + packageName);
+                scheduleBubbleTaskSnapshots(context, packageName, reason,
+                        "upstream-" + apiVariant.toLowerCase(Locale.ROOT),
+                        controller, null, intent);
+                return true;
+            } catch (Throwable t) {
+                logDetailedInfo(context, reason + ": upstream-compatible Bubble launch failed="
+                        + t.getClass().getSimpleName());
+                Log.w(TAG, reason + ": upstream-compatible Bubble launch failed: " + t.getMessage());
+                return false;
+            }
         }
+
+        logDetailedInfo(context, reason + ": upstream legacy Intent/PendingIntent BubbleController"
+                + " APIs unavailable; trying the modern TYPE_APP API");
+        // Android 17 moved the upstream entry point to an app-Bubble object. Reuse the module's
+        // API-compatible TYPE_APP implementation before falling back to its TaskView/overflow path.
+        return expandAppBubbleNewApi(controller, intent, user, entryPoint, packageName, reason);
     }
 
     private static Method findLegacyAppBubbleExpandMethod(Object controller, Object entryPoint) {
+        return findAppBubbleExpandMethod(controller, Intent.class, entryPoint);
+    }
+
+    private static Method findPendingIntentAppBubbleExpandMethod(Object controller,
+            Object entryPoint) {
+        return findAppBubbleExpandMethod(controller, PendingIntent.class, entryPoint);
+    }
+
+    private static Method findAppBubbleExpandMethod(Object controller,
+            Class<?> launchParameter, Object entryPoint) {
         if (controller == null) return null;
-        Class<?> bubbleBarLocCls = clOrNull(controller.getClass().getClassLoader(),
+        ClassLoader classLoader = controller.getClass().getClassLoader();
+        Class<?> entryPointClass = entryPoint != null ? entryPoint.getClass()
+                : clOrNull(classLoader,
+                        "com.android.wm.shell.shared.bubbles.logging.EntryPoint");
+        Class<?> bubbleBarLocationClass = clOrNull(classLoader,
                 "com.android.wm.shell.shared.bubbles.BubbleBarLocation");
-        Method expand = findMethodSystemUi(controller.getClass(), "expandStackAndSelectBubble",
-                Intent.class, UserHandle.class,
-                entryPoint != null ? entryPoint.getClass() : Object.class,
-                bubbleBarLocCls != null ? bubbleBarLocCls : Object.class);
-        if (expand != null) return expand;
-        for (Method method : controller.getClass().getDeclaredMethods()) {
-            if (method.getName().equals("expandStackAndSelectBubble")
-                    && method.getParameterCount() == 4
-                    && method.getParameterTypes()[0] == Intent.class) {
+        for (Class<?> type = controller.getClass(); type != null; type = type.getSuperclass()) {
+            for (Method method : type.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if (!method.getName().equals("expandStackAndSelectBubble")
+                        || parameters.length != 4
+                        || parameters[0] != launchParameter
+                        || parameters[1] != UserHandle.class) {
+                    continue;
+                }
+                boolean entryPointMatches = entryPointClass != null
+                        ? parameters[2].isAssignableFrom(entryPointClass)
+                        : "EntryPoint".equals(parameters[2].getSimpleName());
+                boolean locationMatches = bubbleBarLocationClass != null
+                        ? parameters[3] == bubbleBarLocationClass
+                        : "BubbleBarLocation".equals(parameters[3].getSimpleName());
+                if (!entryPointMatches || !locationMatches) continue;
                 method.setAccessible(true);
                 return method;
             }
@@ -4671,7 +4712,10 @@ public class MoreBubbleHookModule extends XposedModule {
     private static Object findEntryPoint(ClassLoader cl, String name) {
         try {
             Class<?> epCls = cl.loadClass("com.android.wm.shell.shared.bubbles.logging.EntryPoint");
-            for (Object e : (Object[]) epCls.getDeclaredField("$VALUES").get(null)) {
+            if (!epCls.isEnum()) return null;
+            Object[] values = epCls.getEnumConstants();
+            if (values == null) return null;
+            for (Object e : values) {
                 if (name.equals(e.toString())) return e;
             }
         } catch (Throwable t) { Log.w(TAG, "findEntryPoint: " + t.getMessage()); }
