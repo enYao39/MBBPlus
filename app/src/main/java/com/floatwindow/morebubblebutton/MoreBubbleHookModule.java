@@ -361,6 +361,9 @@ public class MoreBubbleHookModule extends XposedModule {
                 summaries.add("{id=" + info.taskId
                         + ",current=" + String.valueOf(info.taskId).equals(sourceTaskId)
                         + ",running=" + info.isRunning
+                        + ",visible=" + taskDiagnosticField(info, "isVisible")
+                        + ",parentTaskId=" + taskDiagnosticField(info, "parentTaskId")
+                        + ",isAppBubble=" + taskDiagnosticField(info, "isAppBubble")
                         + ",top=" + flattenComponent(info.topActivity)
                         + ",base=" + flattenComponent(info.baseActivity) + "}");
                 if (summaries.size() >= 12) break;
@@ -1224,6 +1227,11 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) {
             logBubbleHookStatus(android.util.Log.WARN, "Bubble Shell PendingIntent hook unavailable: "
                     + className + "." + methodName + " error=" + t.getClass().getSimpleName());
+            return installed;
+        }
+        if (installed == 0) {
+            logBubbleHookStatus(android.util.Log.WARN, "Bubble Shell PendingIntent hook unavailable: "
+                    + className + "." + methodName + " reason=no matching signature");
         }
         return installed;
     }
@@ -1259,12 +1267,16 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static String readBubbleRootTaskFeature(ClassLoader classLoader) {
+        java.util.List<String> failures = new java.util.ArrayList<>();
         for (String helper : new String[]{"BubbleAnythingFlagHelper", "BubbleFlagHelper"}) {
             try {
                 Class<?> type = classLoader.loadClass(
                         "com.android.wm.shell.shared.bubbles." + helper);
                 Method method = findMethodSystemUi(type, "enableRootTaskForBubble");
-                if (method == null) continue;
+                if (method == null) {
+                    failures.add(helper + ":method-missing");
+                    continue;
+                }
                 Object receiver = null;
                 if (!java.lang.reflect.Modifier.isStatic(method.getModifiers())) {
                     java.lang.reflect.Field instance = type.getDeclaredField("INSTANCE");
@@ -1272,12 +1284,15 @@ public class MoreBubbleHookModule extends XposedModule {
                     receiver = instance.get(null);
                 }
                 Object value = method.invoke(receiver);
-                if (value instanceof Boolean) return value.toString();
+                if (value instanceof Boolean) return value + " rootTaskFeatureSource=" + helper;
+                failures.add(helper + ":unexpected-result");
+            } catch (ClassNotFoundException ignored) {
+                failures.add(helper + ":class-missing");
             } catch (ReflectiveOperationException | RuntimeException | LinkageError ignored) {
-                // ROMs expose different flag helpers.
+                failures.add(helper + ":" + ignored.getClass().getSimpleName());
             }
         }
-        return "unavailable";
+        return "unavailable rootTaskFeatureLookup=" + String.join(",", failures);
     }
 
     private static String resolveBubbleTaskViewKey(Object listener) {
@@ -3282,6 +3297,7 @@ public class MoreBubbleHookModule extends XposedModule {
             Object entryPoint = findEntryPoint(controller.getClass().getClassLoader(), "NOTIFICATION");
             final Intent finalIntent = targetIntent;
             final UserHandle finalUser = user;
+            final int launchUserId = userId;
             logDetailedInfo(ctx, reason + ": Bubble launch prepared package=" + pkg
                     + " notificationKey=" + notificationKey
                     + " launchFallback=" + usingLaunchFallback
@@ -3290,6 +3306,7 @@ public class MoreBubbleHookModule extends XposedModule {
             logIntentDetails(ctx, reason + ": Bubble submitted intent", finalIntent);
             Runnable work = () -> {
                 try {
+                    logBubbleTaskCandidates(ctx, pkg, launchUserId, reason);
                     if (notif != null && notif.contentIntent != null
                             && launchNotificationIntoExistingAppBubbleTask(controller, pkg,
                             finalUser, notif.contentIntent, finalIntent, reason)) {
@@ -3891,6 +3908,59 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     /** Schedule task snapshots only when detailed logging is enabled. */
+    private static String describeBubbleTaskState(ActivityManager.RunningTaskInfo task) {
+        Object mode = invokeSystemUi(task, "getWindowingMode");
+        if (mode == null) {
+            Object configuration = getFieldSystemUi(task, "configuration");
+            Object windowConfiguration = getFieldSystemUi(configuration, "windowConfiguration");
+            mode = invokeSystemUi(windowConfiguration, "getWindowingMode");
+        }
+        return " taskId=" + task.taskId + " userId=" + taskDiagnosticField(task, "userId")
+                + " displayId=" + taskDiagnosticField(task, "displayId")
+                + " parentTaskId=" + taskDiagnosticField(task, "parentTaskId")
+                + " isAppBubble=" + taskDiagnosticField(task, "isAppBubble")
+                + " visible=" + taskDiagnosticField(task, "isVisible")
+                + " visibleRequested=" + taskDiagnosticField(task, "isVisibleRequested")
+                + " windowingMode=" + (mode == null ? "unavailable" : mode)
+                + " top=" + flattenComponent(task.topActivity)
+                + " base=" + flattenComponent(task.baseActivity);
+    }
+
+    private static Object taskDiagnosticField(Object task, String name) {
+        Object value = getFieldSystemUi(task, name);
+        return value == null ? "unavailable" : value;
+    }
+
+    private static void logBubbleTaskCandidates(Context context, String pkg, int userId,
+            String reason) {
+        if (!isDebugLoggingEnabled(context)) return;
+        try {
+            ActivityManager manager = context.getSystemService(ActivityManager.class);
+            List<ActivityManager.RunningTaskInfo> tasks =
+                    manager == null ? null : manager.getRunningTasks(50);
+            if (tasks == null) {
+                logDetailedInfo(context, reason + ": Bubble candidates package=" + pkg
+                        + " result=query-unavailable");
+                return;
+            }
+            int matches = 0;
+            for (ActivityManager.RunningTaskInfo task : tasks) {
+                if (!(getFieldSystemUi(task, "userId") instanceof Number taskUser)
+                        || taskUser.intValue() != userId) continue;
+                if ((task.topActivity == null || !pkg.equals(task.topActivity.getPackageName()))
+                        && (task.baseActivity == null || !pkg.equals(task.baseActivity.getPackageName()))) continue;
+                matches++;
+                logDetailedInfo(context, reason + ": Bubble candidate before launch package="
+                        + pkg + describeBubbleTaskState(task));
+            }
+            logDetailedInfo(context, reason + ": Bubble candidates package=" + pkg
+                    + " userId=" + userId + " matches=" + matches);
+        } catch (RuntimeException | LinkageError t) {
+            logDetailedInfo(context, reason + ": Bubble candidates package=" + pkg
+                    + " failed=" + t.getClass().getSimpleName());
+        }
+    }
+
     private static void scheduleBubbleTaskSnapshots(Context context, String packageName,
             String reason, String api, Object controller, String bubbleKey, Intent submittedIntent) {
         if (!isDebugLoggingEnabled(context) || packageName == null) return;
@@ -3944,26 +4014,8 @@ public class MoreBubbleHookModule extends XposedModule {
                             continue;
                         }
                         matches++;
-                        int windowingMode = 0;
-                        int displayId = -1;
-                        try {
-                            Object configuration = getFieldSystemUi(task, "configuration");
-                            Object windowConfiguration = configuration != null
-                                    ? invokeSystemUi(configuration, "getWindowConfiguration") : null;
-                            Object mode = windowConfiguration != null
-                                    ? invokeSystemUi(windowConfiguration, "getWindowingMode") : null;
-                            if (mode instanceof Number) windowingMode = ((Number) mode).intValue();
-                        } catch (Throwable ignored) {}
-                        try {
-                            Object id = getFieldSystemUi(task, "displayId");
-                            if (id instanceof Number) displayId = ((Number) id).intValue();
-                        } catch (Throwable ignored) {}
                         logDetailedInfo(context, reason + ": Bubble task snapshot api=" + api
-                                + " elapsedMs=" + delayMs + " taskId=" + task.taskId
-                                + " displayId=" + displayId
-                                + " windowingMode=" + windowingMode
-                                + " top=" + flattenComponent(top)
-                                + " base=" + flattenComponent(base)
+                                + " elapsedMs=" + delayMs + describeBubbleTaskState(task)
                                 + " baseIntent=" + summarizeIntent(task.baseIntent));
                         if (task.baseIntent != null && submittedIntent != null) {
                             logIntentDetails(context, reason + ": task baseIntent", task.baseIntent);
