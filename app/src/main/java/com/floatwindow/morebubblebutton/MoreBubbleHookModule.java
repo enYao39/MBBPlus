@@ -60,10 +60,6 @@ public class MoreBubbleHookModule extends XposedModule {
             java.util.Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Object, Notification.BubbleMetadata> sGeneratedBubbleMetadata =
             java.util.Collections.synchronizedMap(new WeakHashMap<>());
-    private static final Map<String, PendingNativeNotificationBubble> sPendingNativeNotificationBubbles =
-            new ConcurrentHashMap<>();
-    private static volatile boolean sBubblesManagerUserChangeHookInstalled;
-    private static final long[] NATIVE_BUBBLE_VERIFY_DELAYS_MS = {300L, 650L, 1100L};
     private static final long BUBBLE_TASK_DIAGNOSTIC_WINDOW_MS = 15000L;
     private static final ThreadLocal<OutgoingActivityLaunchTrace> sOutgoingActivityLaunchTrace =
             new ThreadLocal<>();
@@ -898,32 +894,9 @@ public class MoreBubbleHookModule extends XposedModule {
                             if (notif != null
                                     && (notif.flags & Notification.FLAG_ONGOING_EVENT) == 0
                                     && notif.contentIntent != null) {
-                                if (isNativeNotificationBubbleCompatibilitySelected(
-                                        chain.getThisObject(), entry)) {
-                                    if (!shouldUseNativeNotificationBubblePath(
-                                            chain.getThisObject(), entry, "expand guard")) {
-                                        Log.w(TAG,
-                                                "expand guard: native compatibility unavailable");
-                                        return null;
-                                    }
-                                    PendingNativeNotificationBubble pending =
-                                            beginNativeNotificationBubbleAttempt(
-                                                    chain.getThisObject(), entry, "expand guard");
-                                    if (pending == null) {
-                                        Log.w(TAG,
-                                                "expand guard: native result cannot be tracked");
-                                        return null;
-                                    }
-                                    Object result;
-                                    try {
-                                        result = chain.proceed();
-                                    } catch (Throwable t) {
-                                        fallbackNativeNotificationBubble(
-                                                pending, "native-expand-threw:" + t.getClass().getSimpleName());
-                                        return null;
-                                    }
-                                    scheduleNativeNotificationBubbleVerification(pending);
-                                    return result;
+                                if (launchNotificationViaUpstreamCompatibility(
+                                        null, chain.getThisObject(), entry, "expand guard")) {
+                                    return null;
                                 }
                                 if (!expandAppBubbleFromNotification(
                                         chain.getThisObject(), entry, "expand guard")) {
@@ -964,47 +937,16 @@ public class MoreBubbleHookModule extends XposedModule {
                     sBubblesManager = bubblesManager;
                     Object entry = null;
                     boolean enabled = false;
-                    boolean compatibilitySelected = false;
-                    boolean useNativeRoute = false;
                     try {
                         enabled = (boolean) chain.getArg(1);
                         entry = chain.getArg(0);
-                        compatibilitySelected = enabled && entry != null
-                                && isNativeNotificationBubbleCompatibilitySelected(
-                                bubblesManager, entry);
-                        useNativeRoute = compatibilitySelected
-                                && shouldUseNativeNotificationBubblePath(
-                                bubblesManager, entry, "user change");
                     } catch (Throwable t) {
                         Log.w(TAG, "user change bubble: " + t.getMessage());
                     }
 
-                    if (compatibilitySelected && !useNativeRoute) {
-                        Log.w(TAG,
-                                "user change: native compatibility unavailable");
+                    if (enabled && entry != null && launchNotificationViaUpstreamCompatibility(
+                            null, bubblesManager, entry, "user change")) {
                         return null;
-                    }
-                    if (useNativeRoute) {
-                        PendingNativeNotificationBubble pending =
-                                beginNativeNotificationBubbleAttempt(
-                                        bubblesManager, entry, "user change");
-                        if (pending == null) {
-                            Log.w(TAG,
-                                    "user change: native result cannot be tracked");
-                            return null;
-                        }
-                        Object result;
-                        try {
-                            result = chain.proceed();
-                        } catch (Throwable t) {
-                            fallbackNativeNotificationBubble(
-                                    pending, "native-user-change-threw:" + t.getClass().getSimpleName());
-                            return null;
-                        }
-                        runOnSysuiMain(bubblesManager,
-                                () -> requestNativeNotificationBubbleExpansion(pending));
-                        scheduleNativeNotificationBubbleVerification(pending);
-                        return result;
                     }
                     if (enabled && entry != null) {
                         if (!expandAppBubbleFromNotification(
@@ -1015,7 +957,6 @@ public class MoreBubbleHookModule extends XposedModule {
                     }
                     return chain.proceed();
                 });
-                sBubblesManagerUserChangeHookInstalled = true;
                 Log.i(TAG, "Hooked BubblesManager.onUserChangedBubble OK");
             } else {
                 Log.w(TAG, "BubblesManager.onUserChangedBubble(NotificationEntry, boolean) not found");
@@ -1062,35 +1003,9 @@ public class MoreBubbleHookModule extends XposedModule {
                         }
                         Log.i(TAG, "Bubble button: Freeform unavailable, using Bubble");
                     } else if (compatibilitySelected) {
-                        if (sBubblesManager == null) {
-                            Log.w(TAG,
-                                    "Bubble button: Bubble manager unavailable");
-                            return null;
-                        }
-                        if (!shouldUseNativeNotificationBubblePath(
-                                sBubblesManager, entry, "Bubble button")) {
-                            Log.w(TAG,
-                                    "Bubble button: native compatibility unavailable");
-                            return null;
-                        }
-                        PendingNativeNotificationBubble pending =
-                                beginNativeNotificationBubbleAttempt(
-                                        sBubblesManager, entry, "Bubble button");
-                        if (pending == null) {
-                            Log.w(TAG,
-                                    "Bubble button: native result cannot be tracked");
-                            return null;
-                        }
-                        Object result;
-                        try {
-                            result = chain.proceed();
-                        } catch (Throwable t) {
-                            fallbackNativeNotificationBubble(
-                                    pending, "native-click-threw:" + t.getClass().getSimpleName());
-                            return null;
-                        }
-                        scheduleNativeNotificationBubbleVerification(pending);
-                        return result;
+                        launchNotificationViaUpstreamCompatibility(
+                                context, sBubblesManager, entry, "Bubble button");
+                        return null;
                     }
                 }
                 // Preserve the native path if the module cannot construct an app Bubble.
@@ -2557,7 +2472,7 @@ public class MoreBubbleHookModule extends XposedModule {
             if (launchNotificationInFreeformSbn(ctx, sbn, reason)) return true;
             Log.i(TAG, reason + ": freeform unavailable, falling back to Bubble");
         }
-        if (entry != null && launchNotificationViaNativeCompatibility(
+        if (entry != null && launchNotificationViaUpstreamCompatibility(
                 ctx, sBubblesManager, entry, reason + ": swipe compatibility")) {
             return true;
         }
@@ -2582,7 +2497,7 @@ public class MoreBubbleHookModule extends XposedModule {
             if (launchNotificationInFreeformSbn(ctx, sbn, reason)) return true;
             Log.i(TAG, reason + ": freeform unavailable, falling back to Bubble");
         }
-        if (entry != null && launchNotificationViaNativeCompatibility(
+        if (entry != null && launchNotificationViaUpstreamCompatibility(
                 ctx, sBubblesManager, entry, reason + ": swipe compatibility")) {
             return true;
         }
@@ -3521,399 +3436,19 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    /**
-     * Compatibility-selected apps use SystemUI's native NotificationEntry Bubble route.
-     * This is distinct from creating a TYPE_APP Bubble from an extracted Intent or PendingIntent:
-     * the native path consumes the notification's BubbleMetadata and owns TaskView attachment.
-     */
-    private static boolean shouldUseNativeNotificationBubblePath(Object bubblesManager,
-            Object entry, String reason) {
-        try {
-            Object sbn = getFieldSystemUi(entry, "mSbn");
-            if (sbn == null) return false;
-            Object packageValue = invokeSystemUi(sbn, "getPackageName");
-            if (!(packageValue instanceof String)) return false;
-            String packageName = (String) packageValue;
-
-            Object bubblesImpl = getFieldSystemUi(bubblesManager, "mBubbles");
-            Object controller = getFieldSystemUi(bubblesImpl, "this$0");
-            Context context = (Context) getFieldSystemUi(controller, "mContext");
-            if (context == null || !isNativeNotificationBubbleCompatibilitySelected(
-                    bubblesManager, entry)) {
-                return false;
-            }
-
-            Notification notification = (Notification) invokeSystemUi(sbn, "getNotification");
-            if (notification == null || notification.contentIntent == null
-                    || (notification.flags & Notification.FLAG_ONGOING_EVENT) != 0) {
-                logDetailedInfo(context, reason + ": native notification Bubble route unavailable"
-                        + " package=" + packageName + " reason=missing-content-intent-or-ongoing");
-                return false;
-            }
-
-            // NotificationEntry.canBubble is widened by the module hook; ensure the entry and
-            // Notification carry matching BubbleMetadata before calling SystemUI's original path.
-            prepareBubbleMetadata(entry);
-            Object metadata = getFieldSystemUi(entry, "mBubbleMetadata");
-            if (!(metadata instanceof Notification.BubbleMetadata)) {
-                logDetailedInfo(context, reason + ": native notification Bubble route unavailable"
-                        + " package=" + packageName + " reason=metadata-not-prepared");
-                return false;
-            }
-
-            logDetailedInfo(context, reason + ": delegating to native NotificationEntry Bubble route"
-                    + " package=" + packageName + " metadata=" + metadata.getClass().getName());
-            Log.i(TAG, reason + ": using native notification Bubble route for " + packageName);
-            return true;
-        } catch (Throwable t) {
-            Log.w(TAG, reason + ": native notification Bubble route check failed: "
-                    + t.getClass().getSimpleName());
-            return false;
-        }
-    }
-
     private static boolean isNativeNotificationBubbleCompatibilitySelected(
             Object bubblesManager, Object entry) {
-        try {
-            Object sbn = getFieldSystemUi(entry, "mSbn");
-            Object packageValue = sbn != null ? invokeSystemUi(sbn, "getPackageName") : null;
-            if (!(packageValue instanceof String)) return false;
-            Object bubblesImpl = getFieldSystemUi(bubblesManager, "mBubbles");
-            Object controller = getFieldSystemUi(bubblesImpl, "this$0");
-            Context context = (Context) getFieldSystemUi(controller, "mContext");
-            return context != null
-                    && ModuleSettings.getOpenMode(context) == ModuleSettings.OPEN_MODE_BUBBLE
-                    && ModuleSettings.isBubbleNotificationCompatibilityEnabled(
-                    context, (String) packageValue);
-        } catch (Throwable t) {
-            return false;
-        }
+        return isNativeNotificationBubbleCompatibilitySelected(
+                getBubblesManagerContext(bubblesManager), entry);
     }
 
-    private static final class NativeNotificationBubbleState {
-        Object bubble;
-        boolean selected;
-        Boolean expanded;
-        boolean expandedForKey;
-        int taskId = -1;
-        String status = "unknown";
-
-        boolean isReady() {
-            return bubble != null && taskId >= 0
-                    && Boolean.TRUE.equals(expanded)
-                    && (expandedForKey || selected);
-        }
-    }
-
-    private static final class PendingNativeNotificationBubble {
-        final String key;
-        final String reason;
-        final Object bubblesManager;
-        final Object entry;
-        final NativeNotificationBubbleState initialState;
-        final long startedAt = SystemClock.elapsedRealtime();
-        int retryIndex;
-        boolean verificationStarted;
-
-        PendingNativeNotificationBubble(String key, String reason,
-                Object bubblesManager, Object entry) {
-            this.key = key;
-            this.reason = reason;
-            this.bubblesManager = bubblesManager;
-            this.entry = entry;
-            this.initialState = readNativeNotificationBubbleState(bubblesManager, key);
-        }
-    }
-
-    private static PendingNativeNotificationBubble beginNativeNotificationBubbleAttempt(
+    private static boolean launchNotificationViaUpstreamCompatibility(Context context,
             Object bubblesManager, Object entry, String reason) {
-        if (bubblesManager == null || entry == null) return null;
-        Object sbn = getFieldSystemUi(entry, "mSbn");
-        String key = sbn != null ? getNotificationKey(sbn) : null;
-        if (key == null) {
-            Object entryKey = getFieldSystemUi(entry, "key");
-            if (entryKey instanceof String) key = (String) entryKey;
+        if (context == null) context = getBubblesManagerContext(bubblesManager);
+        if (!isNativeNotificationBubbleCompatibilitySelected(context, entry)) return false;
+        if (!expandAppBubbleFromNotification(bubblesManager, entry, reason + ": upstream", true)) {
+            Log.w(TAG, reason + ": upstream app Bubble request unavailable");
         }
-        if (key == null) return null;
-
-        PendingNativeNotificationBubble existing = sPendingNativeNotificationBubbles.get(key);
-        if (existing != null && existing.entry == entry
-                && SystemClock.elapsedRealtime() - existing.startedAt < 5000L) {
-            return existing;
-        }
-
-        PendingNativeNotificationBubble pending = new PendingNativeNotificationBubble(
-                key, reason, bubblesManager, entry);
-        sPendingNativeNotificationBubbles.put(key, pending);
-        return pending;
-    }
-
-    private static void requestNativeNotificationBubbleExpansion(
-            PendingNativeNotificationBubble pending) {
-        if (sPendingNativeNotificationBubbles.get(pending.key) != pending) return;
-        try {
-            for (Class<?> type = pending.bubblesManager.getClass(); type != null;
-                    type = type.getSuperclass()) {
-                for (Method method : type.getDeclaredMethods()) {
-                    Class<?>[] parameters = method.getParameterTypes();
-                    if (method.getName().equals("expandStackAndSelectBubble")
-                            && parameters.length == 1
-                            && parameters[0].getName().contains("NotificationEntry")
-                            && parameters[0].isInstance(pending.entry)) {
-                        method.setAccessible(true);
-                        method.invoke(pending.bubblesManager, pending.entry);
-                        Log.i(TAG, pending.reason + ": requested native notification Bubble expansion");
-                        return;
-                    }
-                }
-            }
-            Log.w(TAG, pending.reason + ": native notification Bubble expansion API unavailable");
-        } catch (Throwable t) {
-            Log.w(TAG, pending.reason + ": native notification Bubble expansion failed", t);
-        }
-    }
-
-    private static void scheduleNativeNotificationBubbleVerification(
-            PendingNativeNotificationBubble pending) {
-        if (pending == null
-                || sPendingNativeNotificationBubbles.get(pending.key) != pending) return;
-        synchronized (pending) {
-            if (pending.verificationStarted) return;
-            pending.verificationStarted = true;
-        }
-        new Handler(Looper.getMainLooper()).postDelayed(
-                () -> verifyNativeNotificationBubble(pending),
-                NATIVE_BUBBLE_VERIFY_DELAYS_MS[0]);
-    }
-
-    private static void verifyNativeNotificationBubble(PendingNativeNotificationBubble pending) {
-        if (pending == null
-                || sPendingNativeNotificationBubbles.get(pending.key) != pending) return;
-        NativeNotificationBubbleState state = readNativeNotificationBubbleState(
-                pending.bubblesManager, pending.key);
-        boolean unchangedReadyState = pending.initialState.isReady()
-                && pending.initialState.bubble == state.bubble
-                && pending.initialState.taskId == state.taskId;
-        if (state.isReady() && !unchangedReadyState) {
-            sPendingNativeNotificationBubbles.remove(pending.key, pending);
-            Context context = getBubblesManagerContext(pending.bubblesManager);
-            logDetailedInfo(context, pending.reason
-                    + ": native notification Bubble ready key=" + pending.key
-                    + " taskId=" + state.taskId);
-            return;
-        }
-
-        if (pending.retryIndex < NATIVE_BUBBLE_VERIFY_DELAYS_MS.length - 1) {
-            long delay = NATIVE_BUBBLE_VERIFY_DELAYS_MS[++pending.retryIndex];
-            new Handler(Looper.getMainLooper()).postDelayed(
-                    () -> verifyNativeNotificationBubble(pending), delay);
-            return;
-        }
-        fallbackNativeNotificationBubble(pending,
-                state.isReady() && unchangedReadyState ? "already-expanded-before-click" : state.status);
-    }
-
-    private static NativeNotificationBubbleState readNativeNotificationBubbleState(
-            Object bubblesManager, String notificationKey) {
-        NativeNotificationBubbleState result = new NativeNotificationBubbleState();
-        if (bubblesManager == null || notificationKey == null) {
-            result.status = "manager-or-key-unavailable";
-            return result;
-        }
-        try {
-            Object bubbles = getFieldSystemUi(bubblesManager, "mBubbles");
-            Object controller = getFieldSystemUi(bubbles, "this$0");
-            Object bubbleData = getFieldSystemUi(controller, "mBubbleData");
-            if (bubbleData == null) {
-                result.status = findFieldSystemUi(controller != null
-                        ? controller.getClass() : null, "mBubbleData") == null
-                        ? "bubble-data-field-unavailable" : "bubble-data-null";
-                return result;
-            }
-            Method lookup = findMethodSystemUi(
-                    bubbleData.getClass(), "getBubbleInStackWithKey", String.class);
-            if (lookup != null) result.bubble = lookup.invoke(bubbleData, notificationKey);
-
-            if (result.bubble == null) {
-                Method getBubbles = findMethodSystemUi(bubbleData.getClass(), "getBubbles");
-                Object values = getBubbles != null ? getBubbles.invoke(bubbleData) : null;
-                if (values instanceof java.util.Collection<?>) {
-                    for (Object bubble : (java.util.Collection<?>) values) {
-                        if (notificationKey.equals(String.valueOf(getBubbleKey(bubble)))) {
-                            result.bubble = bubble;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (result.bubble == null) {
-                Method overflow = findMethodSystemUi(
-                        bubbleData.getClass(), "getOverflowBubbleWithKey", String.class);
-                if (overflow != null) result.bubble = overflow.invoke(bubbleData, notificationKey);
-            }
-            if (result.bubble == null) {
-                result.status = "notification-bubble-not-found";
-                return result;
-            }
-
-            Object selected = invokeSystemUi(bubbleData, "getSelectedBubble");
-            result.selected = selected != null
-                    && notificationKey.equals(String.valueOf(getBubbleKey(selected)));
-            Method isBubbleExpanded = findMethodSystemUi(
-                    bubbles.getClass(), "isBubbleExpanded", String.class);
-            if (isBubbleExpanded != null) {
-                Object value = isBubbleExpanded.invoke(bubbles, notificationKey);
-                if (value instanceof Boolean) {
-                    result.expanded = (Boolean) value;
-                    result.expandedForKey = true;
-                }
-            }
-            if (result.expanded == null) {
-                Object value = invokeSystemUi(bubbleData, "isExpanded");
-                if (!(value instanceof Boolean)) value = getFieldSystemUi(bubbleData, "mExpanded");
-                if (value instanceof Boolean) result.expanded = (Boolean) value;
-            }
-            result.taskId = getNotificationBubbleTaskId(result.bubble);
-            if (result.isReady()) {
-                result.status = "expanded-task-ready";
-            } else if (result.taskId < 0) {
-                result.status = "bubble-task-not-created";
-            } else if (!result.selected && !result.expandedForKey) {
-                result.status = "bubble-not-selected";
-            } else {
-                result.status = "bubble-not-expanded-or-not-selected";
-            }
-        } catch (Throwable t) {
-            result.status = "state-query-failed:" + t.getClass().getSimpleName();
-        }
-        return result;
-    }
-
-    private static int getNotificationBubbleTaskId(Object bubble) {
-        int taskId = readTaskId(bubble);
-        if (taskId >= 0) return taskId;
-        Object expandedView = invokeSystemUi(bubble, "getExpandedView");
-        if (expandedView == null) expandedView = getFieldSystemUi(bubble, "mExpandedView");
-        taskId = readTaskId(expandedView);
-        if (taskId >= 0) return taskId;
-        Object bubbleBarView = invokeSystemUi(bubble, "getBubbleBarExpandedView");
-        if (bubbleBarView == null) {
-            bubbleBarView = getFieldSystemUi(bubble, "mBubbleBarExpandedView");
-        }
-        taskId = readTaskId(bubbleBarView);
-        if (taskId >= 0) return taskId;
-        Object helper = bubbleBarView != null
-                ? getFieldSystemUi(bubbleBarView, "mBubbleTaskViewHelper") : null;
-        return readTaskId(helper);
-    }
-
-    private static int readTaskId(Object object) {
-        if (object == null) return -1;
-        Object value = invokeSystemUi(object, "getTaskId");
-        if (!(value instanceof Number)) value = getFieldSystemUi(object, "mTaskId");
-        return value instanceof Number ? ((Number) value).intValue() : -1;
-    }
-
-    private static void fallbackNativeNotificationBubble(
-            PendingNativeNotificationBubble pending, String failure) {
-        if (pending == null
-                || !sPendingNativeNotificationBubbles.remove(pending.key, pending)) return;
-        NativeNotificationBubbleState state = readNativeNotificationBubbleState(
-                pending.bubblesManager, pending.key);
-        Context context = getBubblesManagerContext(pending.bubblesManager);
-        logDetailedInfo(context, pending.reason
-                + ": native notification Bubble unavailable"
-                + " key=" + pending.key + " failure=" + failure
-                + " state=" + state.status + " taskId=" + state.taskId);
-        try {
-            probeRedditBubble(pending, context);
-        } catch (RuntimeException e) {
-            logDetailedInfo(context, "Reddit native Bubble probe failed: "
-                    + e.getClass().getSimpleName());
-        }
-    }
-
-    private static void probeRedditBubble(PendingNativeNotificationBubble pending, Context context) {
-        if (!isDebugLoggingEnabled(context)) return;
-        Object sbn = getFieldSystemUi(pending.entry, "mSbn");
-        if (!"com.reddit.frontpage".equals(invokeSystemUi(sbn, "getPackageName"))) return;
-        Object shell = getFieldSystemUi(pending.bubblesManager, "mBubbles");
-        Object data = getFieldSystemUi(getFieldSystemUi(shell, "this$0"), "mBubbleData");
-        for (String field : new String[]{"mBubbles", "mOverflowBubbles", "mPendingBubbles",
-                "mSuppressedBubbles"}) {
-            Object value = getFieldSystemUi(data, field);
-            java.util.Collection<?> candidates = value instanceof Map<?, ?> map ? map.values()
-                    : value instanceof java.util.Collection<?> collection ? collection : null;
-            int reddit = 0;
-            boolean exact = false;
-            if (candidates != null) {
-                for (Object bubble : candidates) {
-                    if ("com.reddit.frontpage".equals(invokeSystemUi(bubble, "getPackageName"))) {
-                        reddit++;
-                    }
-                    exact |= pending.key.equals(getBubbleKey(bubble));
-                }
-            }
-            logDetailedInfo(context, "Reddit native Bubble probe " + field
-                    + " readable=" + (candidates != null) + " redditCandidates=" + reddit
-                    + " exactKey=" + exact);
-        }
-    }
-
-    private static boolean launchNotificationViaNativeCompatibility(Context context,
-            Object bubblesManager, Object entry, String reason) {
-        Object sbn = getFieldSystemUi(entry, "mSbn");
-        Object packageValue = sbn != null ? invokeSystemUi(sbn, "getPackageName") : null;
-        boolean compatibilitySelected = context != null && packageValue instanceof String
-                ? isNativeNotificationBubbleCompatibilitySelected(
-                context, (String) packageValue)
-                : isNativeNotificationBubbleCompatibilitySelected(bubblesManager, entry);
-        if (!compatibilitySelected) return false;
-        if (bubblesManager == null) {
-            Log.w(TAG, reason + ": Bubble manager unavailable");
-            return true;
-        }
-        if (!shouldUseNativeNotificationBubblePath(bubblesManager, entry, reason)) {
-            Log.w(TAG, reason + ": native compatibility unavailable");
-            return true;
-        }
-        if (!sBubblesManagerUserChangeHookInstalled) {
-            Context managerContext = getBubblesManagerContext(bubblesManager);
-            logDetailedInfo(managerContext, reason
-                    + ": native user-change hook unavailable");
-            Log.w(TAG, reason + ": native user-change hook unavailable");
-            return true;
-        }
-        Method userChange = null;
-        for (Class<?> type = bubblesManager.getClass(); type != null && userChange == null;
-                type = type.getSuperclass()) {
-            for (Method method : type.getDeclaredMethods()) {
-                Class<?>[] parameters = method.getParameterTypes();
-                if (method.getName().equals("onUserChangedBubble")
-                        && parameters.length == 2 && parameters[1] == boolean.class
-                        && parameters[0].isAssignableFrom(entry.getClass())
-                        && parameters[0].getName().contains("NotificationEntry")) {
-                    method.setAccessible(true);
-                    userChange = method;
-                    break;
-                }
-            }
-        }
-        if (userChange == null) {
-            Log.w(TAG, reason + ": native user-change API unavailable");
-            return true;
-        }
-        Method finalUserChange = userChange;
-        Runnable invoke = () -> {
-            try {
-                finalUserChange.invoke(bubblesManager, entry, true);
-            } catch (Throwable t) {
-                Log.w(TAG,
-                        reason + ": native user-change invocation failed");
-            }
-        };
-        if (Looper.myLooper() == Looper.getMainLooper()) invoke.run();
-        else runOnSysuiMain(bubblesManager, invoke);
         return true;
     }
 
@@ -3940,6 +3475,11 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     private static boolean expandAppBubbleFromNotification(Object bubblesManager, Object entry, String reason) {
+        return expandAppBubbleFromNotification(bubblesManager, entry, reason, false);
+    }
+
+    private static boolean expandAppBubbleFromNotification(Object bubblesManager, Object entry,
+            String reason, boolean upstreamCompatibility) {
         try {
             Object sbn = getFieldSystemUi(entry, "mSbn");
             if (sbn == null) return false;
@@ -3991,7 +3531,7 @@ public class MoreBubbleHookModule extends XposedModule {
             if (targetIntent == null) {
                 Log.w(TAG, reason + ": skip app bubble, no target intent for " + pkg);
                 collapseShadeFromManager(bubblesManager);
-                return launchNotificationFullscreen(entry, reason);
+                return !upstreamCompatibility && launchNotificationFullscreen(entry, reason);
             }
             if (targetIntent.getPackage() == null) {
                 targetIntent.setPackage(pkg);
@@ -4011,15 +3551,15 @@ public class MoreBubbleHookModule extends XposedModule {
                 try {
                     logBubbleTaskCandidates(ctx, pkg, launchUserId, reason);
                     if (launchNotificationBubbleRoute(controller, notif, pkg,
-                            finalUser, finalIntent, entryPoint, ctx, reason)) {
+                            finalUser, finalIntent, entryPoint, reason, upstreamCompatibility)) {
                         finishNotificationBubbleLaunch(bubblesManager, entry);
                     } else {
                         Log.w(TAG, reason + ": no compatible app Bubble route available");
-                        launchNotificationFullscreen(entry, reason);
+                        if (!upstreamCompatibility) launchNotificationFullscreen(entry, reason);
                     }
                 } catch (Throwable t) {
                     Log.w(TAG, reason + ": app bubble expand failed: " + t.getMessage());
-                    launchNotificationFullscreen(entry, reason);
+                    if (!upstreamCompatibility) launchNotificationFullscreen(entry, reason);
                 }
             };
             Object executor = getFieldSystemUi(controller, "mMainExecutor");
@@ -4035,17 +3575,10 @@ public class MoreBubbleHookModule extends XposedModule {
     /** Shared module Bubble route for notifications not delegated to native SystemUI. */
     private static boolean launchNotificationBubbleRoute(Object controller,
             Notification notification, String packageName, UserHandle user, Intent intent,
-            Object entryPoint, Context context, String reason) throws Exception {
-        return launchNotificationViaLocalBubblePath(controller, notification, packageName,
-                user, intent, entryPoint, reason);
-    }
-
-    /** Shared module route: reuse a live Bubble TaskView, promote overflow, then use Shell APIs. */
-    private static boolean launchNotificationViaLocalBubblePath(Object controller,
-            Notification notification, String packageName, UserHandle user, Intent intent,
-            Object entryPoint, String reason) throws Exception {
+            Object entryPoint, String reason, boolean upstreamCompatibility) throws Exception {
         PendingIntent contentIntent = notification != null ? notification.contentIntent : null;
-        if (contentIntent != null && launchNotificationIntoExistingAppBubbleTask(controller,
+        if (!upstreamCompatibility && contentIntent != null
+                && launchNotificationIntoExistingAppBubbleTask(controller,
                 packageName, user, contentIntent, intent, reason)) {
             return true;
         }
