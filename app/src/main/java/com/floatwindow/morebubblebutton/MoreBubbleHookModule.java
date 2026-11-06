@@ -892,6 +892,10 @@ public class MoreBubbleHookModule extends XposedModule {
                             if (notif != null
                                     && (notif.flags & Notification.FLAG_ONGOING_EVENT) == 0
                                     && notif.contentIntent != null) {
+                                if (shouldUseNativeNotificationBubblePath(
+                                        chain.getThisObject(), entry, "expand guard")) {
+                                    return chain.proceed();
+                                }
                                 if (!expandAppBubbleFromNotification(
                                         chain.getThisObject(), entry, "expand guard")) {
                                     launchNotificationFullscreen(entry, "expand guard");
@@ -932,6 +936,10 @@ public class MoreBubbleHookModule extends XposedModule {
                         boolean enabled = (boolean) chain.getArg(1);
                         Object entry = chain.getArg(0);
                         if (enabled && entry != null) {
+                            if (shouldUseNativeNotificationBubblePath(
+                                    chain.getThisObject(), entry, "user change")) {
+                                return chain.proceed();
+                            }
                             if (!expandAppBubbleFromNotification(
                                     chain.getThisObject(), entry, "user change")) {
                                 launchNotificationFullscreen(entry, "user change");
@@ -3394,6 +3402,59 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
+    /**
+     * Compatibility-selected apps use SystemUI's native NotificationEntry Bubble route.
+     * This is distinct from creating a TYPE_APP Bubble from an extracted Intent or PendingIntent:
+     * the native path consumes the notification's BubbleMetadata and owns TaskView attachment.
+     */
+    private static boolean shouldUseNativeNotificationBubblePath(Object bubblesManager,
+            Object entry, String reason) {
+        try {
+            Object sbn = getFieldSystemUi(entry, "mSbn");
+            if (sbn == null) return false;
+            Object packageValue = invokeSystemUi(sbn, "getPackageName");
+            if (!(packageValue instanceof String)) return false;
+            String packageName = (String) packageValue;
+
+            Object bubblesImpl = getFieldSystemUi(bubblesManager, "mBubbles");
+            Object controller = getFieldSystemUi(bubblesImpl, "this$0");
+            Context context = (Context) getFieldSystemUi(controller, "mContext");
+            if (context == null
+                    || ModuleSettings.getOpenMode(context) != ModuleSettings.OPEN_MODE_BUBBLE
+                    || !ModuleSettings.isBubbleNotificationCompatibilityEnabled(
+                    context, packageName)) {
+                return false;
+            }
+
+            Notification notification = (Notification) invokeSystemUi(sbn, "getNotification");
+            if (notification == null || notification.contentIntent == null
+                    || (notification.flags & Notification.FLAG_ONGOING_EVENT) != 0) {
+                logDetailedInfo(context, reason + ": native notification Bubble route unavailable"
+                        + " package=" + packageName + " reason=missing-content-intent-or-ongoing");
+                return false;
+            }
+
+            // NotificationEntry.canBubble is widened by the module hook; ensure the entry and
+            // Notification carry matching BubbleMetadata before calling SystemUI's original path.
+            prepareBubbleMetadata(entry);
+            Object metadata = getFieldSystemUi(entry, "mBubbleMetadata");
+            if (!(metadata instanceof Notification.BubbleMetadata)) {
+                logDetailedInfo(context, reason + ": native notification Bubble route unavailable"
+                        + " package=" + packageName + " reason=metadata-not-prepared");
+                return false;
+            }
+
+            logDetailedInfo(context, reason + ": delegating to native NotificationEntry Bubble route"
+                    + " package=" + packageName + " metadata=" + metadata.getClass().getName());
+            Log.i(TAG, reason + ": using native notification Bubble route for " + packageName);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, reason + ": native notification Bubble route check failed: "
+                    + t.getClass().getSimpleName());
+            return false;
+        }
+    }
+
     private static boolean expandAppBubbleFromNotification(Object bubblesManager, Object entry, String reason) {
         try {
             Object sbn = getFieldSystemUi(entry, "mSbn");
@@ -3487,24 +3548,10 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    /** Shared notification dispatch: configured upstream route, then the local task-aware route. */
+    /** Shared module Bubble route for notifications not delegated to native SystemUI. */
     private static boolean launchNotificationBubbleRoute(Object controller,
             Notification notification, String packageName, UserHandle user, Intent intent,
             Object entryPoint, Context context, String reason) throws Exception {
-        PendingIntent contentIntent = notification != null ? notification.contentIntent : null;
-        boolean useUpstreamCompatibilityRoute = context != null
-                && ModuleSettings.getOpenMode(context) == ModuleSettings.OPEN_MODE_BUBBLE
-                && ModuleSettings.isBubbleNotificationCompatibilityEnabled(context, packageName);
-        if (useUpstreamCompatibilityRoute) {
-            logDetailedInfo(context, reason
-                    + ": using upstream-compatible Bubble route for " + packageName);
-            if (launchNotificationViaUpstreamBubblePath(controller, intent, contentIntent,
-                    user, entryPoint, packageName, reason)) {
-                return true;
-            }
-            logDetailedInfo(context, reason + ": upstream-compatible Bubble route unavailable;"
-                    + " continuing with local Bubble route for " + packageName);
-        }
         return launchNotificationViaLocalBubblePath(controller, notification, packageName,
                 user, intent, entryPoint, reason);
     }
@@ -3539,60 +3586,8 @@ public class MoreBubbleHookModule extends XposedModule {
         runOnSysuiMain(bubblesManager, () -> collapseShadeFromManager(bubblesManager));
     }
 
-    /**
-     * Invoke the upstream notification Bubble path, bypassing local TaskView/overflow routing.
-     * SystemUI signatures vary by release/ROM; select by parameter types instead of ROM name.
-     */
-    private static boolean launchNotificationViaUpstreamBubblePath(Object controller,
-            Intent intent, PendingIntent notificationPendingIntent, UserHandle user,
-            Object entryPoint, String packageName, String reason) {
-        Method expand = findLegacyAppBubbleExpandMethod(controller, entryPoint);
-        Object launchArgument = intent;
-        String apiVariant = "Intent";
-        if (expand == null && notificationPendingIntent != null) {
-            // The API 36 SystemUI inspected for Lunaris exposes the upstream controller route
-            // with the notification's PendingIntent instead of an extracted Intent. This keeps
-            // the original sender token and follows BubbleController's own TYPE_APP path.
-            expand = findPendingIntentAppBubbleExpandMethod(controller, entryPoint);
-            if (expand != null) {
-                launchArgument = notificationPendingIntent;
-                apiVariant = "PendingIntent";
-            }
-        }
-        Context context = (Context) getFieldSystemUi(controller, "mContext");
-        if (expand != null) {
-            try {
-                expand.invoke(controller, launchArgument, user, entryPoint, null);
-                logDetailedInfo(context, reason + ": resolved upstream BubbleController API="
-                        + expand.toGenericString());
-                Log.i(TAG, reason + ": expanded app Bubble through upstream-compatible "
-                        + apiVariant + " API for " + packageName);
-                scheduleBubbleTaskSnapshots(context, packageName, reason,
-                        "upstream-" + apiVariant.toLowerCase(Locale.ROOT),
-                        controller, null, intent);
-                return true;
-            } catch (Throwable t) {
-                logDetailedInfo(context, reason + ": upstream-compatible Bubble launch failed="
-                        + t.getClass().getSimpleName());
-                Log.w(TAG, reason + ": upstream-compatible Bubble launch failed: " + t.getMessage());
-                return false;
-            }
-        }
-
-        logDetailedInfo(context, reason + ": upstream legacy Intent/PendingIntent BubbleController"
-                + " APIs unavailable; trying the modern TYPE_APP API");
-        // Android 17 moved the upstream entry point to an app-Bubble object. Reuse the module's
-        // API-compatible TYPE_APP implementation before falling back to its TaskView/overflow path.
-        return expandAppBubbleNewApi(controller, intent, user, entryPoint, packageName, reason);
-    }
-
     private static Method findLegacyAppBubbleExpandMethod(Object controller, Object entryPoint) {
         return findAppBubbleExpandMethod(controller, Intent.class, entryPoint);
-    }
-
-    private static Method findPendingIntentAppBubbleExpandMethod(Object controller,
-            Object entryPoint) {
-        return findAppBubbleExpandMethod(controller, PendingIntent.class, entryPoint);
     }
 
     private static Method findAppBubbleExpandMethod(Object controller,
