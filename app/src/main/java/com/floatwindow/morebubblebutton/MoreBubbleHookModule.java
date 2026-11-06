@@ -931,23 +931,34 @@ public class MoreBubbleHookModule extends XposedModule {
             }
             if (onUserChanged != null) {
                 hook(onUserChanged).intercept(chain -> {
-                    sBubblesManager = chain.getThisObject();
+                    Object bubblesManager = chain.getThisObject();
+                    sBubblesManager = bubblesManager;
+                    Object entry = null;
+                    boolean enabled = false;
+                    boolean useNativeRoute = false;
                     try {
-                        boolean enabled = (boolean) chain.getArg(1);
-                        Object entry = chain.getArg(0);
-                        if (enabled && entry != null) {
-                            if (shouldUseNativeNotificationBubblePath(
-                                    chain.getThisObject(), entry, "user change")) {
-                                return chain.proceed();
-                            }
-                            if (!expandAppBubbleFromNotification(
-                                    chain.getThisObject(), entry, "user change")) {
-                                launchNotificationFullscreen(entry, "user change");
-                            }
-                            return null;
-                        }
+                        enabled = (boolean) chain.getArg(1);
+                        entry = chain.getArg(0);
+                        useNativeRoute = enabled && entry != null
+                                && shouldUseNativeNotificationBubblePath(
+                                bubblesManager, entry, "user change");
                     } catch (Throwable t) {
                         Log.w(TAG, "user change bubble: " + t.getMessage());
+                    }
+
+                    if (useNativeRoute) {
+                        Object result = chain.proceed();
+                        Object nativeEntry = entry;
+                        runOnSysuiMain(bubblesManager, () -> requestNativeNotificationBubbleExpansion(
+                                bubblesManager, nativeEntry, "user change"));
+                        return result;
+                    }
+                    if (enabled && entry != null) {
+                        if (!expandAppBubbleFromNotification(
+                                bubblesManager, entry, "user change")) {
+                            launchNotificationFullscreen(entry, "user change");
+                        }
+                        return null;
                     }
                     return chain.proceed();
                 });
@@ -3456,6 +3467,55 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) {
             Log.w(TAG, reason + ": native notification Bubble route check failed: "
                     + t.getClass().getSimpleName());
+            return false;
+        }
+    }
+
+    /** Request native Bubble expansion after the native click handler updates notification state. */
+    private static boolean requestNativeNotificationBubbleExpansion(Object bubblesManager,
+            Object entry, String reason) {
+        if (bubblesManager == null || entry == null) return false;
+        try {
+            Method expand = null;
+            for (Class<?> type = bubblesManager.getClass(); type != null && expand == null;
+                    type = type.getSuperclass()) {
+                for (Method method : type.getDeclaredMethods()) {
+                    Class<?>[] parameters = method.getParameterTypes();
+                    if (method.getName().equals("expandStackAndSelectBubble")
+                            && parameters.length == 1
+                            && parameters[0].isAssignableFrom(entry.getClass())
+                            && parameters[0].getName().contains("NotificationEntry")) {
+                        method.setAccessible(true);
+                        expand = method;
+                        break;
+                    }
+                }
+            }
+            if (expand == null) {
+                Context context = null;
+                Object bubblesImpl = getFieldSystemUi(bubblesManager, "mBubbles");
+                Object controller = getFieldSystemUi(bubblesImpl, "this$0");
+                context = (Context) getFieldSystemUi(controller, "mContext");
+                logDetailedInfo(context, reason + ": native Bubble expand API unavailable"
+                        + " entryClass=" + entry.getClass().getName());
+                Log.w(TAG, reason + ": native NotificationEntry Bubble expand API unavailable");
+                return false;
+            }
+
+            expand.invoke(bubblesManager, entry);
+            Context context = null;
+            Object bubblesImpl = getFieldSystemUi(bubblesManager, "mBubbles");
+            Object controller = getFieldSystemUi(bubblesImpl, "this$0");
+            context = (Context) getFieldSystemUi(controller, "mContext");
+            logDetailedInfo(context, reason + ": requested native NotificationEntry Bubble expansion"
+                    + " api=" + expand.toGenericString());
+            Log.i(TAG, reason + ": requested native NotificationEntry Bubble expansion");
+            return true;
+        } catch (Throwable t) {
+            Throwable cause = t instanceof java.lang.reflect.InvocationTargetException
+                    && t.getCause() != null ? t.getCause() : t;
+            Log.w(TAG, reason + ": native NotificationEntry Bubble expansion failed: "
+                    + cause.getClass().getSimpleName());
             return false;
         }
     }
