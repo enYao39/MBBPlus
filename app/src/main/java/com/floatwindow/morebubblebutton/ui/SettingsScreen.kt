@@ -715,11 +715,19 @@ private fun BubbleCompatibilityAppPickerDialog(
 ) {
     var search by remember { mutableStateOf("") }
     var selected by remember(selectedPackages) { mutableStateOf(selectedPackages.toSet()) }
-    val filteredApps = remember(apps, search) {
-        if (search.isBlank()) apps else apps.filter {
-            it.label.contains(search, ignoreCase = true)
-                    || it.packageName.contains(search, ignoreCase = true)
-        }
+    val filteredApps = remember(apps, search, selected) {
+        apps.asSequence()
+            .filter {
+                search.isBlank()
+                        || it.label.contains(search, ignoreCase = true)
+                        || it.packageName.contains(search, ignoreCase = true)
+            }
+            .sortedWith(
+                compareByDescending<LaunchableApp> { it.packageName in selected }
+                    .thenBy { it.label.lowercase() }
+                    .thenBy { it.packageName }
+            )
+            .toList()
     }
 
     AlertDialog(
