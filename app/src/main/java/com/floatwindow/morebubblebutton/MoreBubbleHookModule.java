@@ -53,8 +53,12 @@ import io.github.libxposed.api.XposedModuleInterface.SystemServerStartingParam;
 
 public class MoreBubbleHookModule extends XposedModule {
     private static final String TAG = "MoreBubbleModule";
-    private static final String REDDIT_AUTHENTICATOR_SERVICE =
-            "com.reddit.auth.login.impl.AuthService";
+    private static final String REDDIT_PACKAGE = "com.reddit.frontpage";
+    private static final String REDDIT_MAIN_ACTIVITY =
+            "com.reddit.launch.main.MainActivity";
+    private static final long REDDIT_BUBBLE_TASK_CREATE_TIMEOUT_MS = 8000L;
+    private static final long REDDIT_BUBBLE_MAIN_ACTIVITY_READY_DELAY_MS = 650L;
+    private static final long REDDIT_BUBBLE_PENDING_INTENT_SPACING_MS = 350L;
     private static View sSecondRow;
     private static final Set<String> sActivityIntentDiagnosticPackages = ConcurrentHashMap.newKeySet();
     private static final Set<String> sRedditDeepLinkDiagnosticPackages = ConcurrentHashMap.newKeySet();
@@ -65,6 +69,8 @@ public class MoreBubbleHookModule extends XposedModule {
             java.util.Collections.synchronizedMap(new WeakHashMap<>());
     private static final Map<Object, Notification.BubbleMetadata> sGeneratedBubbleMetadata =
             java.util.Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<String, PendingRedditBubbleLaunch> sPendingRedditBubbleLaunches =
+            new ConcurrentHashMap<>();
     private static final long BUBBLE_TASK_DIAGNOSTIC_WINDOW_MS = 15000L;
     private static final ThreadLocal<OutgoingActivityLaunchTrace> sOutgoingActivityLaunchTrace =
             new ThreadLocal<>();
@@ -98,6 +104,34 @@ public class MoreBubbleHookModule extends XposedModule {
 
         RedditDeepLinkRouteTrace(String id) {
             this.id = id;
+        }
+    }
+
+    private static final class PendingRedditBubbleRequest {
+        final PendingIntent pendingIntent;
+        final Runnable onStarted;
+
+        PendingRedditBubbleRequest(PendingIntent pendingIntent, Runnable onStarted) {
+            this.pendingIntent = pendingIntent;
+            this.onStarted = onStarted;
+        }
+    }
+
+    private static final class PendingRedditBubbleLaunch {
+        final String bubbleKey;
+        final Context context;
+        final long createdAt;
+        final java.util.concurrent.ConcurrentLinkedQueue<PendingRedditBubbleRequest> requests =
+                new java.util.concurrent.ConcurrentLinkedQueue<>();
+        final AtomicBoolean taskCreated = new AtomicBoolean(false);
+        final AtomicBoolean deliveryScheduled = new AtomicBoolean(false);
+        volatile Object taskView;
+        volatile int taskId = -1;
+
+        PendingRedditBubbleLaunch(String bubbleKey, Context context) {
+            this.bubbleKey = bubbleKey;
+            this.context = context;
+            this.createdAt = SystemClock.elapsedRealtime();
         }
     }
 
@@ -871,8 +905,16 @@ public class MoreBubbleHookModule extends XposedModule {
         Log.i(TAG, "Hooking SystemUI...");
         // Bubble task observers are optional diagnostics; the notification/Bubble hooks below
         // remain active independently of the debug switch.
-        if (isDebugLoggingEnabledForClassLoader(cl)) {
+        boolean detailedDebugEnabled = isDebugLoggingEnabledForClassLoader(cl);
+        if (detailedDebugEnabled) {
             hookBubbleTaskLifecycleDiagnostics(cl);
+        } else if (isLunarisSystem()) {
+            // This callback is functional, not diagnostic: it delivers Reddit's notification
+            // PendingIntent only after the compatibility Bubble TaskView owns a task.
+            hookBubbleTaskViewCallbacks(cl,
+                    "com.android.wm.shell.bubbles.BubbleTaskViewListener", false);
+            hookBubbleTaskViewCallbacks(cl,
+                    "com.android.wm.shell.bubbles.BubbleTaskView$listener$1", false);
         }
         // 1. shouldShowBubbleButton: 让所有具备可打开入口的非锁屏通知显示按钮。
         //    Bubble 按钮与 Heads-up 下滑横条由独立设置控制。
@@ -1099,8 +1141,8 @@ public class MoreBubbleHookModule extends XposedModule {
         } catch (Throwable t) { Log.w(TAG, "Hook onUserChangedBubble: " + t.getMessage()); }
 
         // The native popup/shade Bubble button enters through NotificationEntryAdapter.
-        // Freeform mode keeps its existing route; compatibility-selected Bubble apps use
-        // SystemUI's native notification path and fall back to fullscreen on failure.
+        // Freeform mode keeps its existing route. Compatibility-selected Bubble apps use
+        // the compatibility route below; normal notifications retain SystemUI's own path.
         try {
             Class<?> adapterClass = cl.loadClass(
                     "com.android.systemui.statusbar.notification.collection.NotificationEntryAdapter");
@@ -1285,9 +1327,9 @@ public class MoreBubbleHookModule extends XposedModule {
 
         int taskViewListenerHooks = 0;
         taskViewListenerHooks += hookBubbleTaskViewCallbacks(cl,
-                "com.android.wm.shell.bubbles.BubbleTaskViewListener");
+                "com.android.wm.shell.bubbles.BubbleTaskViewListener", true);
         taskViewListenerHooks += hookBubbleTaskViewCallbacks(cl,
-                "com.android.wm.shell.bubbles.BubbleTaskView$listener$1");
+                "com.android.wm.shell.bubbles.BubbleTaskView$listener$1", true);
         int taskViewStartHooks = hookBubbleTaskViewStartActivity(cl);
         int transactionHooks = hookBubblePendingIntentOptions(cl,
                 "android.window.WindowContainerTransaction", "sendPendingIntent");
@@ -1308,7 +1350,8 @@ public class MoreBubbleHookModule extends XposedModule {
     }
 
     /** Hook the newer BubbleTaskView listener API used by Lunaris AOSP 3.12. */
-    private int hookBubbleTaskViewCallbacks(ClassLoader classLoader, String className) {
+    private int hookBubbleTaskViewCallbacks(ClassLoader classLoader, String className,
+            boolean diagnosticHooks) {
         int installed = 0;
         try {
             Class<?> listenerClass = classLoader.loadClass(className);
@@ -1327,6 +1370,7 @@ public class MoreBubbleHookModule extends XposedModule {
                 boolean bubbleUpdated = "setBubble".equals(name) && parameters.length == 1;
                 if (!created && !removed && !visibility && !initialized && !released
                         && !bubbleUpdated) continue;
+                if (!diagnosticHooks && !created) continue;
                 method.setAccessible(true);
                 hook(method).intercept(chain -> {
                     Object listener = chain.getThisObject();
@@ -1341,7 +1385,9 @@ public class MoreBubbleHookModule extends XposedModule {
                         }
                     }
                     boolean diagnosticWindow = isBubbleTaskDiagnosticActive(packageName);
-                    if (!diagnosticWindow) return chain.proceed();
+                    PendingRedditBubbleLaunch pendingLaunch = created && bubbleKey != null
+                            ? sPendingRedditBubbleLaunches.get(bubbleKey) : null;
+                    if (!diagnosticWindow && pendingLaunch == null) return chain.proceed();
                     int taskId = parameters.length > 0 && chain.getArg(0) instanceof Number
                             ? ((Number) chain.getArg(0)).intValue() : -1;
                     ComponentName activity = created && parameters.length > 1
@@ -1351,24 +1397,31 @@ public class MoreBubbleHookModule extends XposedModule {
                     if (taskView != null && bubbleKey != null) {
                         sBubbleTaskViewDiagnosticKeys.put(taskView, bubbleKey);
                     }
-                    logDiagnosticInfo("Bubble TaskView listener event=" + name
-                            + " api=" + className + " package=" + packageName
-                            + " bubbleKey=" + bubbleKey + " taskId=" + taskId
-                            + (bubbleUpdated ? " updatedPackage="
-                            + getBubblePackageName(chain.getArg(0)) : "")
-                            + " activity=" + flattenComponent(activity)
-                            + " taskView=" + describeBubbleTaskView(listener));
+                    if (diagnosticWindow) {
+                        logDiagnosticInfo("Bubble TaskView listener event=" + name
+                                + " api=" + className + " package=" + packageName
+                                + " bubbleKey=" + bubbleKey + " taskId=" + taskId
+                                + (bubbleUpdated ? " updatedPackage="
+                                + getBubblePackageName(chain.getArg(0)) : "")
+                                + " activity=" + flattenComponent(activity)
+                                + " taskView=" + describeBubbleTaskView(listener));
+                    }
                     Object result;
                     try {
                         result = chain.proceed();
                     } catch (Throwable t) {
-                        logDiagnosticInfo("Bubble TaskView listener event failed="
-                                + name + " api=" + className + " bubbleKey=" + bubbleKey
-                                + " taskId=" + taskId + " error="
-                                + t.getClass().getSimpleName());
+                        if (diagnosticWindow) {
+                            logDiagnosticInfo("Bubble TaskView listener event failed="
+                                    + name + " api=" + className + " bubbleKey=" + bubbleKey
+                                    + " taskId=" + taskId + " error="
+                                    + t.getClass().getSimpleName());
+                        }
                         throw t;
                     }
-                    if (bubbleUpdated) {
+                    if (created && pendingLaunch != null) {
+                        onRedditBubbleTaskCreated(pendingLaunch, taskView, taskId, activity);
+                    }
+                    if (diagnosticWindow && bubbleUpdated) {
                         String updatedKey = resolveBubbleTaskViewKey(listener);
                         logDiagnosticInfo("Bubble TaskView listener bubble set"
                                 + " api=" + className + " package="
@@ -3389,6 +3442,23 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
+    private static boolean isLunarisSystem() {
+        return !getSystemProperty("ro.lunaris.version", "").trim().isEmpty()
+                || !getSystemProperty("ro.lunaris.maintainer", "").trim().isEmpty();
+    }
+
+    private static String getSystemProperty(String key, String defaultValue) {
+        try {
+            Class<?> systemProperties = Class.forName("android.os.SystemProperties");
+            Method get = systemProperties.getDeclaredMethod("get", String.class, String.class);
+            get.setAccessible(true);
+            Object result = get.invoke(null, key, defaultValue);
+            return result instanceof String ? (String) result : defaultValue;
+        } catch (Throwable ignored) {
+            return defaultValue;
+        }
+    }
+
     private static boolean configureFreeformOptions(ActivityOptions options, Context ctx,
             boolean setBounds) {
         try {
@@ -3685,9 +3755,13 @@ public class MoreBubbleHookModule extends XposedModule {
             Runnable work = () -> {
                 try {
                     logBubbleTaskCandidates(ctx, pkg, launchUserId, reason);
+                    AtomicBoolean completionDeferred = new AtomicBoolean(false);
+                    Runnable finishLaunch = () ->
+                            finishNotificationBubbleLaunch(bubblesManager, entry);
                     if (launchNotificationBubbleRoute(controller, notif, pkg,
-                            finalUser, finalIntent, entryPoint, reason, upstreamCompatibility)) {
-                        finishNotificationBubbleLaunch(bubblesManager, entry);
+                            finalUser, finalIntent, entryPoint, reason, upstreamCompatibility,
+                            launchUserId, completionDeferred, finishLaunch)) {
+                        if (!completionDeferred.get()) finishLaunch.run();
                     } else {
                         Log.w(TAG, reason + ": no compatible app Bubble route available");
                         if (!upstreamCompatibility) launchNotificationFullscreen(entry, reason);
@@ -3699,17 +3773,7 @@ public class MoreBubbleHookModule extends XposedModule {
             };
             Object executor = getFieldSystemUi(controller, "mMainExecutor");
             Method execute = executor != null ? findMethodSystemUi(executor.getClass(), "execute", Runnable.class) : null;
-            Runnable submit = () -> {
-                try {
-                    if (execute != null) execute.invoke(executor, work); else work.run();
-                } catch (Exception e) {
-                    Log.w(TAG, reason + ": Bubble executor rejected request", e);
-                }
-            };
-            if (upstreamCompatibility && "com.reddit.frontpage".equals(pkg)) {
-                runOnSysuiMain(bubblesManager, () -> warmRedditBeforeBubble(
-                        ctx, user, submit));
-            } else if (execute != null) {
+            if (execute != null) {
                 execute.invoke(executor, work);
             } else {
                 work.run();
@@ -3721,106 +3785,19 @@ public class MoreBubbleHookModule extends XposedModule {
         }
     }
 
-    private static void warmRedditBeforeBubble(Context context, UserHandle user,
-            Runnable openBubble) {
-        if (context == null || user == null) {
-            openBubble.run();
-            return;
-        }
-
-        // Reddit's notification entry point and RedditDeepLinkActivity do not declare
-        // separate processes. Binding this exported account-authenticator Service starts
-        // the same default app process without launching its launcher Activity or creating
-        // a regular task before the Bubble request.
-        AtomicBoolean completed = new AtomicBoolean(false);
-        AtomicBoolean bound = new AtomicBoolean(false);
-        ServiceConnection connection = new ServiceConnection() {
-            private void continueWithBubble(String result) {
-                if (!completed.compareAndSet(false, true)) {
-                    unbindRedditWarmupService(context, this, bound);
-                    return;
-                }
-                logDetailedInfo(context, "Reddit Bubble compatibility: process warmup " + result);
-                unbindRedditWarmupService(context, this, bound);
-                openBubble.run();
-            }
-
-            @Override
-            public void onServiceConnected(ComponentName name, IBinder service) {
-                continueWithBubble("service connected");
-            }
-
-            @Override
-            public void onServiceDisconnected(ComponentName name) {
-                // The normal path unbinds immediately after connection; no action needed.
-            }
-
-            @Override
-            public void onBindingDied(ComponentName name) {
-                continueWithBubble("binding died; continuing");
-            }
-
-            @Override
-            public void onNullBinding(ComponentName name) {
-                continueWithBubble("null binding; process started");
-            }
-        };
-
-        try {
-            Method bind = findMethodSystemUi(context.getClass(), "bindServiceAsUser",
-                    Intent.class, ServiceConnection.class, int.class, UserHandle.class);
-            if (bind == null) throw new NoSuchMethodException("bindServiceAsUser");
-            Intent serviceIntent = new Intent("android.accounts.AccountAuthenticator")
-                    .setComponent(new ComponentName("com.reddit.frontpage",
-                            REDDIT_AUTHENTICATOR_SERVICE));
-            boolean accepted = (boolean) bind.invoke(context, serviceIntent, connection,
-                    Context.BIND_AUTO_CREATE, user);
-            if (!accepted) {
-                if (completed.compareAndSet(false, true)) {
-                    Log.w(TAG, "Reddit Bubble compatibility: process warmup bind rejected; "
-                            + "continuing with Bubble");
-                    openBubble.run();
-                }
-                return;
-            }
-            bound.set(true);
-            logDetailedInfo(context,
-                    "Reddit Bubble compatibility: requested process-only warmup");
-        } catch (Throwable e) {
-            if (completed.compareAndSet(false, true)) {
-                Log.w(TAG, "Reddit Bubble compatibility: process warmup unavailable; "
-                        + "continuing with Bubble", e);
-                unbindRedditWarmupService(context, connection, bound);
-                openBubble.run();
-            }
-            return;
-        }
-
-        Handler handler = new Handler(Looper.getMainLooper());
-        handler.postDelayed(() -> {
-            if (!completed.compareAndSet(false, true)) return;
-            Log.w(TAG, "Reddit Bubble compatibility: process warmup timed out; "
-                    + "continuing with Bubble");
-            unbindRedditWarmupService(context, connection, bound);
-            openBubble.run();
-        }, 1800L);
-    }
-
-    private static void unbindRedditWarmupService(Context context, ServiceConnection connection,
-            AtomicBoolean bound) {
-        if (!bound.compareAndSet(true, false)) return;
-        try {
-            context.unbindService(connection);
-        } catch (Throwable t) {
-            Log.w(TAG, "Reddit Bubble compatibility: warmup service unbind failed: "
-                    + t.getClass().getSimpleName());
-        }
-    }
-
     /** Shared module Bubble route for notifications not delegated to native SystemUI. */
     private static boolean launchNotificationBubbleRoute(Object controller,
             Notification notification, String packageName, UserHandle user, Intent intent,
-            Object entryPoint, String reason, boolean upstreamCompatibility) throws Exception {
+            Object entryPoint, String reason, boolean upstreamCompatibility,
+            int userId, AtomicBoolean completionDeferred,
+            Runnable finishAfterPendingIntent) throws Exception {
+        if (upstreamCompatibility && REDDIT_PACKAGE.equals(packageName)
+                && isLunarisSystem()
+                && launchRedditBubbleTaskViewRoute(controller, notification, user,
+                userId, entryPoint, reason, completionDeferred, finishAfterPendingIntent)) {
+            return true;
+        }
+
         PendingIntent contentIntent = notification != null ? notification.contentIntent : null;
         if (!upstreamCompatibility && contentIntent != null
                 && launchNotificationIntoExistingAppBubbleTask(controller,
@@ -3840,6 +3817,226 @@ public class MoreBubbleHookModule extends XposedModule {
 
         // Modern Shell builds replace the direct Intent overload with TYPE_APP Bubble objects.
         return expandAppBubbleNewApi(controller, intent, user, entryPoint, packageName, reason);
+    }
+
+    /**
+     * Reddit's cold notification route needs a real MainActivity task inside the Bubble before
+     * its singleTask deep-link Activity can route into it on Lunaris. Seed the TYPE_APP Bubble
+     * with Reddit's launcher Activity, wait for the BubbleTaskView task-created callback, then
+     * deliver the notification's original PendingIntent into that same TaskView.
+     */
+    private static boolean launchRedditBubbleTaskViewRoute(Object controller,
+            Notification notification, UserHandle user, int userId,
+            Object entryPoint, String reason,
+            AtomicBoolean completionDeferred, Runnable finishAfterPendingIntent) {
+        Context context = (Context) getFieldSystemUi(controller, "mContext");
+        PendingIntent notificationIntent = notification != null ? notification.contentIntent : null;
+        if (context == null || user == null || notificationIntent == null) return false;
+
+        String bubbleKey = getAppBubbleKey(controller, REDDIT_PACKAGE, user);
+        if (bubbleKey == null) {
+            logDetailedInfo(context, reason + ": Reddit Bubble seed unavailable; app Bubble key missing");
+            return false;
+        }
+
+        PendingRedditBubbleLaunch pending = sPendingRedditBubbleLaunches.get(bubbleKey);
+        if (pending != null) {
+            pending.requests.add(new PendingRedditBubbleRequest(
+                    notificationIntent, finishAfterPendingIntent));
+            completionDeferred.set(true);
+            if (pending.taskCreated.get()) scheduleRedditBubblePendingIntentDelivery(pending,
+                    REDDIT_BUBBLE_PENDING_INTENT_SPACING_MS);
+            logDetailedInfo(context, reason + ": queued notification PendingIntent for Reddit Bubble taskId="
+                    + pending.taskId);
+            return true;
+        }
+
+        Boolean reusableMainActivityTask = hasReusableRedditMainActivityTask(context,
+                userId);
+        if (reusableMainActivityTask == null) {
+            logDetailedInfo(context, reason + ": Reddit MainActivity task lookup unavailable; "
+                    + "using existing compatibility route");
+            return false;
+        }
+        if (reusableMainActivityTask) {
+            logDetailedInfo(context, reason + ": Reddit MainActivity task already exists; "
+                    + "using existing compatibility route");
+            return false;
+        }
+
+        Intent seedIntent;
+        try {
+            seedIntent = context.getPackageManager().getLaunchIntentForPackage(REDDIT_PACKAGE);
+        } catch (Throwable t) {
+            logDetailedInfo(context, reason + ": Reddit launcher Intent lookup failed="
+                    + t.getClass().getSimpleName());
+            return false;
+        }
+        if (seedIntent == null || !isRedditMainActivity(seedIntent.getComponent())) {
+            logDetailedInfo(context, reason + ": Reddit Bubble seed unavailable; launcher target="
+                    + flattenComponent(seedIntent != null ? seedIntent.getComponent() : null));
+            return false;
+        }
+        seedIntent = new Intent(seedIntent);
+        seedIntent.setPackage(REDDIT_PACKAGE);
+        seedIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+
+        PendingRedditBubbleLaunch newPending = new PendingRedditBubbleLaunch(bubbleKey, context);
+        newPending.requests.add(new PendingRedditBubbleRequest(
+                notificationIntent, finishAfterPendingIntent));
+        PendingRedditBubbleLaunch existing = sPendingRedditBubbleLaunches.putIfAbsent(
+                bubbleKey, newPending);
+        if (existing != null) {
+            existing.requests.add(new PendingRedditBubbleRequest(
+                    notificationIntent, finishAfterPendingIntent));
+            completionDeferred.set(true);
+            if (existing.taskCreated.get()) scheduleRedditBubblePendingIntentDelivery(existing,
+                    REDDIT_BUBBLE_PENDING_INTENT_SPACING_MS);
+            return true;
+        }
+
+        completionDeferred.set(true);
+        if (!expandAppBubbleNewApi(controller, seedIntent, user, entryPoint,
+                REDDIT_PACKAGE, reason + ": Reddit MainActivity Bubble seed")) {
+            sPendingRedditBubbleLaunches.remove(bubbleKey, newPending);
+            completionDeferred.set(false);
+            logDetailedInfo(context, reason + ": Reddit MainActivity Bubble seed request failed");
+            return false;
+        }
+
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (!sPendingRedditBubbleLaunches.remove(bubbleKey, newPending)) return;
+            newPending.requests.clear();
+            Log.w(TAG, "Reddit compatibility Bubble TaskView did not create a task; "
+                    + "notification PendingIntent was not sent");
+        }, REDDIT_BUBBLE_TASK_CREATE_TIMEOUT_MS);
+        logDetailedInfo(context, reason + ": Reddit MainActivity Bubble seed submitted; "
+                + "waiting for TaskView task creation");
+        return true;
+    }
+
+    private static String getAppBubbleKey(Object controller, String packageName, UserHandle user) {
+        try {
+            Class<?> bubbleClass = controller.getClass().getClassLoader()
+                    .loadClass("com.android.wm.shell.bubbles.Bubble");
+            Method getKey = bubbleClass.getMethod("getAppBubbleKeyForApp",
+                    String.class, UserHandle.class);
+            Object key = getKey.invoke(null, packageName, user);
+            return key instanceof String ? (String) key : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static Boolean hasReusableRedditMainActivityTask(Context context, int userId) {
+        try {
+            Object activityManager = context.getSystemService(Context.ACTIVITY_SERVICE);
+            if (activityManager == null) return null;
+            Method getRunningTasks = activityManager.getClass()
+                    .getMethod("getRunningTasks", int.class);
+            Object result = getRunningTasks.invoke(activityManager, 32);
+            if (!(result instanceof List<?>)) return null;
+            for (Object task : (List<?>) result) {
+                NotificationTaskSnapshot snapshot = readNotificationTaskSnapshot(task);
+                if (snapshot == null || snapshot.userId != userId) continue;
+                if (isRedditMainActivity(snapshot.topActivity)
+                        || isRedditMainActivity(snapshot.baseActivity)) {
+                    logDetailedInfo(context, "Reddit MainActivity task found before Bubble request taskId="
+                            + snapshot.taskId);
+                    return true;
+                }
+            }
+            logDetailedInfo(context, "Reddit MainActivity task not present before Bubble request");
+            return false;
+        } catch (Throwable t) {
+            logDetailedInfo(context, "Reddit MainActivity task lookup failed="
+                    + t.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    private static boolean isRedditMainActivity(ComponentName component) {
+        return component != null && REDDIT_PACKAGE.equals(component.getPackageName())
+                && REDDIT_MAIN_ACTIVITY.equals(component.getClassName());
+    }
+
+    private static void onRedditBubbleTaskCreated(PendingRedditBubbleLaunch pending,
+            Object taskView, int taskId, ComponentName activity) {
+        if (pending == null || taskView == null || taskId < 0
+                || !isRedditMainActivity(activity)
+                || SystemClock.elapsedRealtime() - pending.createdAt
+                > REDDIT_BUBBLE_TASK_CREATE_TIMEOUT_MS
+                || !pending.taskCreated.compareAndSet(false, true)) return;
+        pending.taskView = taskView;
+        pending.taskId = taskId;
+        logDetailedInfo(pending.context, "Reddit Bubble TaskView owns MainActivity taskId="
+                + taskId + "; waiting for Activity initialization");
+        scheduleRedditBubblePendingIntentDelivery(pending,
+                REDDIT_BUBBLE_MAIN_ACTIVITY_READY_DELAY_MS);
+    }
+
+    private static void scheduleRedditBubblePendingIntentDelivery(
+            PendingRedditBubbleLaunch pending, long delayMs) {
+        if (pending == null || !pending.taskCreated.get() || pending.taskView == null
+                || pending.requests.isEmpty()
+                || !pending.deliveryScheduled.compareAndSet(false, true)) return;
+        new Handler(Looper.getMainLooper()).postDelayed(
+                () -> deliverRedditBubblePendingIntent(pending), delayMs);
+    }
+
+    private static void deliverRedditBubblePendingIntent(PendingRedditBubbleLaunch pending) {
+        if (pending == null || sPendingRedditBubbleLaunches.get(pending.bubbleKey) != pending) {
+            return;
+        }
+        PendingRedditBubbleRequest request = pending.requests.poll();
+        if (request == null) {
+            sPendingRedditBubbleLaunches.remove(pending.bubbleKey, pending);
+            pending.deliveryScheduled.set(false);
+            return;
+        }
+        try {
+            ActivityOptions options = ActivityOptions.makeCustomAnimation(
+                    pending.context, 0, 0);
+            Method alwaysOnTop = findMethodSystemUi(options.getClass(),
+                    "setTaskAlwaysOnTop", boolean.class);
+            if (alwaysOnTop != null) alwaysOnTop.invoke(options, true);
+            Method launchedFromBubble = findMethodSystemUi(options.getClass(),
+                    "setLaunchedFromBubble", boolean.class);
+            if (launchedFromBubble != null) launchedFromBubble.invoke(options, true);
+            setPendingIntentBackgroundStartAllowed(options);
+
+            Rect launchBounds = new Rect();
+            Method getBounds = findMethodSystemUi(pending.taskView.getClass(),
+                    "getBoundsOnScreen", Rect.class);
+            if (getBounds != null) getBounds.invoke(pending.taskView, launchBounds);
+            if (launchBounds.isEmpty()) launchBounds = null;
+
+            if (!startPendingIntentInTaskView(pending.taskView, request.pendingIntent,
+                    null, options, launchBounds)) {
+                throw new IllegalStateException("TaskView startActivity unavailable");
+            }
+            logDetailedInfo(pending.context, "Reddit notification PendingIntent delivered to "
+                    + "Bubble TaskView taskId=" + pending.taskId);
+            try {
+                request.onStarted.run();
+            } catch (Throwable t) {
+                Log.w(TAG, "Reddit Bubble notification completion failed: "
+                        + t.getClass().getSimpleName());
+            }
+            pending.deliveryScheduled.set(false);
+            if (pending.requests.isEmpty()) {
+                sPendingRedditBubbleLaunches.remove(pending.bubbleKey, pending);
+            } else {
+                scheduleRedditBubblePendingIntentDelivery(pending,
+                        REDDIT_BUBBLE_PENDING_INTENT_SPACING_MS);
+            }
+        } catch (Throwable t) {
+            sPendingRedditBubbleLaunches.remove(pending.bubbleKey, pending);
+            pending.requests.clear();
+            pending.deliveryScheduled.set(false);
+            Log.w(TAG, "Reddit compatibility Bubble TaskView delivery failed: "
+                    + t.getClass().getSimpleName());
+        }
     }
 
     private static void finishNotificationBubbleLaunch(Object bubblesManager, Object entry) {
