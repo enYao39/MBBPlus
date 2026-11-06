@@ -4,7 +4,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块，为 Pixel Launcher 最近任�
 
 > Evolution 17 是当前主要实机验证基线；Lunaris AOSP 3.12 已针对通知注入路径做过兼容性验证。其他 ROM、Launcher、SystemUI 版本尚未验证，不能假设行为完全兼容。
 
-当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档对应版本为 `1.7.56 (64)`。
+当前开发分支为 `experimental`，版本号以 `app/build.gradle.kts` 为准；本文档对应版本为 `1.7.73 (81)`。
 
 ## 功能
 
@@ -16,6 +16,7 @@ MoreBubbleButton 是一个 Android/Xposed 模块，为 Pixel Launcher 最近任�
 - Bubble/Freeform 按钮支持两种打开方式：
   - Bubble：创建并展开 app bubble
   - Freeform：优先以系统自由窗口打开
+- 通知 Bubble 支持按应用选择兼容路径；被选中的应用改用 SystemUI 上游通知 Bubble 启动方式
 - Freeform 不可用时自动回退到 Bubble，再回退到全屏启动
 - 点击通知按钮后：
   - 优先跳转通知 `contentIntent` 对应界面，而不是只打开 app 首页
@@ -107,13 +108,20 @@ MoreBubbleButton 是一个 Android/Xposed 模块，为 Pixel Launcher 最近任�
 | Hook 目标 | 作用 |
 |-----------|------|
 | `NotificationContentView.shouldShowBubbleButton` | 为符合条件的非锁屏通知显示 Bubble/Freeform 按钮；兼容无参与 `NotificationEntry` 参数版本，swipe 模式不再隐藏按钮 |
-| `BubblesManager.onUserChangedBubble` / `expandStackAndSelectBubble` | 拦截通知气泡点击，改走稳定的 app bubble 路径 |
-| `BubbleController.expandStackAndSelectBubble(Intent, UserHandle, EntryPoint, null)` | 使用通知 `contentIntent` 创建并展开 app bubble |
+| `BubblesManager.onUserChangedBubble` / `expandStackAndSelectBubble` | 拦截通知气泡点击，并按设置选择 Bubble/Freeform 路径 |
+| 本地 Bubble 路径 | 优先复用匹配用户的现有 Bubble TaskView 或 overflow Bubble，再使用当前 SystemUI 的 app Bubble API |
+| 按应用兼容路径 | 对选中的应用调用 SystemUI 上游 BubbleController 通知入口，优先传递原通知 `PendingIntent`；仅在 Bubble 打开方式下生效，调用不可用时回退到本地路径 |
 | `BubbleCoordinator.removeNotification` | 在气泡成功展开后移除 auto-cancel 通知 |
 
 通知 Freeform 会在发送通知 PendingIntent 前记录当前 task 状态；之后按通知所属用户、应用和 task 变化关联新启动的 task，再请求 LMO 将其移入自由窗口。若启动后的 task 无法关联或移动请求失败，代码不会再次发送同一通知 PendingIntent，而会尝试按 Activity 组件恢复。这个异步恢复可能无法保留通知专属的会话上下文，不能据此保证深链已成功；需要结合设备实际行为验证。Bubble 复用时按包含 Android 用户身份的 Bubble key 查找，避免个人资料和工作资料之间串用。
 
 Heads-up swipe 的待启动操作由 Heads-up 状态轮询和 SystemUI 的离场动画生命周期钩子触发；单纯的通知行 detach 不会启动操作。`setHeadsUpAnimatingAway(false)` 和 `onEntryAnimatingAwayEnded` 是动画生命周期信号，不等于每次都独立确认了 Heads-up 状态已经退出。
+
+## 已知问题
+
+- Reddit 通知 Bubble 偶尔可能停留在旧页面、没有留在 Bubble 中，或未显示预期的通知目标。当前日志还不足以确定唯一根因；可能与 Reddit 的 DeepLink/Activity task 复用方式及 ROM 对 Bubble 启动 Intent 的处理差异有关，这仍是待验证的推断。
+- 可在「Actions/操作 → 按应用设置 Bubble 兼容方式」中选择 Reddit，让它使用 SystemUI 上游通知 Bubble 路径；未选中的应用继续使用模块本地路径。该兼容路径改变 Bubble 的启动方式，不保证所有 ROM 和 Reddit 通知都能正确打开目标页面。
+- Activity Intent、Bubble task 生命周期和 System Server task 选择等诊断 hook 只会在对应进程启动时 Debug 日志已开启的情况下注册。开关更改需重载相应作用域进程后生效；若开启后直接关闭，已注册的 hook 仍会记录诊断，直到该进程重载。
 
 ## 构建
 
